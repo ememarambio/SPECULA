@@ -22,11 +22,15 @@ class PsfExposureStore(BaseProcessingObj):
     Exposure bounds are [TSTART, TEND), in simulation seconds; the producer's
     generation time labels the *last sample*, one time_step before TEND.
     Incomplete windows are never written. Existing files are never overwritten.
+    ``stamp_size`` optionally crops each image about its FFT center before
+    writing. The pixel scale and full-PSF normalization are preserved; cropped
+    stamps are not renormalized, so their sums give the retained flux fraction.
     """
 
     def __init__(self, simul_params: SimulParams, store_dir: str, band: str,
                  wavelength_nm: float, pixel_size_mas: float, n_frames: int,
-                 positions: list, field_ids: list, start_time: float = 0):
+                 positions: list, field_ids: list, start_time: float = 0,
+                 stamp_size: int = None):
         # Disk I/O runs on CPU; InputList transfers only completed exposures.
         super().__init__(target_device_idx=-1)
         if int(n_frames) != n_frames or n_frames < 1:
@@ -49,6 +53,9 @@ class PsfExposureStore(BaseProcessingObj):
         self.band = band
         self.wavelength_nm = wavelength_nm
         self.pixel_size_mas = pixel_size_mas
+        if stamp_size is not None and (not isinstance(stamp_size, int) or stamp_size < 1):
+            raise ValueError('stamp_size must be a positive integer')
+        self.stamp_size = stamp_size
         self.last_written = -1
         self.inputs['in_psfs'] = InputList(type=BaseValue)
 
@@ -64,6 +71,19 @@ class PsfExposureStore(BaseProcessingObj):
         super().setup()
         if len(self.local_inputs['in_psfs']) != len(self.field_ids):
             raise ValueError('One PSF input is required per field position')
+        shapes = [p.value.shape for p in self.local_inputs['in_psfs']]
+        if len(shapes[0]) != 2 or any(shape != shapes[0] for shape in shapes):
+            raise ValueError('Expected matching 2D PSFs')
+        self.full_shape = shapes[0]
+        if self.stamp_size is not None:
+            if self.stamp_size > min(self.full_shape):
+                raise ValueError('stamp_size cannot exceed the full PSF dimensions')
+            self.crop_y, self.crop_x = [n // 2 - self.stamp_size // 2 for n in self.full_shape]
+            self.stamp_slice = (slice(self.crop_y, self.crop_y + self.stamp_size),
+                                slice(self.crop_x, self.crop_x + self.stamp_size))
+        else:
+            self.crop_y = self.crop_x = 0
+            self.stamp_slice = (slice(None), slice(None))
         self.store_dir.mkdir(parents=True, exist_ok=True)
         if any(self.store_dir.glob('exposure_*.fits')):
             raise FileExistsError(f'Exposure output already exists in {self.store_dir}')
@@ -79,7 +99,7 @@ class PsfExposureStore(BaseProcessingObj):
         if elapsed <= 0 or elapsed % self.duration:
             raise ValueError('PSF input arrived outside a complete exposure boundary')
         index = elapsed // self.duration - 1
-        cube = np.stack([cpuArray(p.value) for p in psfs])
+        cube = np.stack([cpuArray(p.value[self.stamp_slice]) for p in psfs])
         if cube.ndim != 3 or not np.isfinite(cube).all():
             raise ValueError('Expected finite 2D PSFs')
         header = fits.Header()
@@ -92,6 +112,13 @@ class PsfExposureStore(BaseProcessingObj):
             'EXPTIME': (self.t_to_seconds(self.duration), 'Exposure duration [s]'),
             'TIMEDEL': (self.t_to_seconds(self.loop_dt), 'Simulation step [s]'),
             'BUNIT': 'normalized intensity', 'AXORDER': 'field,y,x',
+            'FULLNX': (self.full_shape[1], 'Full PSF width before cropping [pixel]'),
+            'FULLNY': (self.full_shape[0], 'Full PSF height before cropping [pixel]'),
+            'CROPX0': (self.crop_x, 'First stamp column in full PSF, zero-based'),
+            'CROPY0': (self.crop_y, 'First stamp row in full PSF, zero-based'),
+            'FOVX': (cube.shape[2] * self.pixel_size_mas / 1000, 'Stamp width [arcsec]'),
+            'FOVY': (cube.shape[1] * self.pixel_size_mas / 1000, 'Stamp height [arcsec]'),
+            'NORM': ('FULLPSF', 'Unit sum applies to full PSF before cropping'),
         })
         coords = fits.BinTableHDU.from_columns([
             fits.Column(name='FIELD_ID', format='K', array=self.field_ids),

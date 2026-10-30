@@ -38,7 +38,7 @@ the science run's recorded precision. Add `--displays` to `run` for the optional
 on-axis diagnostic plots.
 
 `psf_grid.yml` controls the science duration, settling time, exposure windows,
-field sampling, batch size, PSF sampling and wavelengths. A copy is saved with
+field sampling, batch size, PSF sampling, stamp size and wavelengths. A copy is saved with
 each science run and used by replay. To use another settings file, pass
 `run ... --settings PATH`. `run ... --science-time 30` records 30 seconds after
 settling, producing three independent 10 s exposures. The usable duration must
@@ -57,8 +57,11 @@ Defaults:
 | Grid | 32 × 32 points, including the boundaries; spacing 21/31 ≈ 0.677″ |
 | Replay batch | 16 field points, both bands |
 | J / K wavelength | 1,250 / 2,200 nm |
-| PSF size | 512 × 512 pixels (`pixel_pupil: 256`, `nd: 2`) |
+| Calculated PSF size | 512 × 512 pixels (`pixel_pupil: 256`, `nd: 2`) |
+| Saved PSF stamp | Central 128 × 128 pixels (`stamp_size: 128`) |
 | J / K pixel scale | Approximately 16.27 / 28.64 mas per pixel |
+| J stamp FoV | Approximately 2.08″ × 2.08″ |
+| K stamp FoV | Approximately 3.67″ × 3.67″ |
 
 These are normalized monochromatic PSFs at representative band wavelengths,
 not filter-integrated or detector-count images. The shared J/K OPD calculation
@@ -82,6 +85,14 @@ timestamp. `PsfExposureStore` writes each resulting cube immediately, keeping
 memory bounded as simulation duration grows. It never writes a partial window
 or replaces an existing exposure. It does not use `PSF.out_int_psf`, which is
 averaged only when the whole simulation finishes.
+
+`stamp_size: 128` crops each completed exposure about the FFT center, retaining
+the native pixel scale at `nd: 2.0` (two pixels per lambda/D). It does not
+recenter on the brightest pixel or renormalize the crop: flux outside the
+stamp is excluded, so the saved pixel sum is the retained fraction of the
+full PSF's unit flux. Set `stamp_size: null` to save the full calculated image.
+The same crop applies to on-axis and field PSFs in both exposure windows and
+both bands. Display images continue to show the full instantaneous PSF.
 
 For example, short exposure 0 covers [0.2, 0.4), exposure 1 covers [0.4, 0.6),
 and long exposure 0 covers [0.2, 10.2). The internal producer timestamp labels
@@ -111,9 +122,13 @@ run01/
     K/...
 ```
 
-Each exposure's primary HDU is an array `[field, psf_y, psf_x]`. Its header
+Each exposure's primary HDU is an array `[field, 128, 128]` by default. Its header
 contains `BAND`, `WAVELEN` (nm), `PIXSCALE` (mas/pixel), `NFRAMES`, `EXPTIME`,
-`TIMEDEL`, `TSTART`, and `TEND` (seconds). The `FIELD` table maps the first array
+`TIMEDEL`, `TSTART`, and `TEND` (seconds). `FULLNX`/`FULLNY` record the original
+image dimensions, `CROPX0`/`CROPY0` give the zero-based crop origin,
+`FOVX`/`FOVY` give the stamp's angular width/height in arcseconds, and
+`NORM=FULLPSF` records that normalization applies before cropping.
+The `FIELD` table maps the first array
 axis to `FIELD_ID`, `X_ARCSEC`, and `Y_ARCSEC`. Grid IDs are row-major:
 `FIELD_ID = iy * grid_size + ix`; x varies fastest. The even-sized field grid
 does not include (0, 0); separate on-axis diagnostics use `FIELD_ID = -1`.
@@ -130,7 +145,9 @@ error rather than being overwritten. After a failed batch, retain/remove its
 incomplete directory as appropriate and restart at its first point. Completed
 batches have `COMPLETE.json`; no automatic skip or overwrite is performed.
 
-The default full grid produces about **102 GiB** of uncompressed float32 image
+The default full grid produces about **6.375 GiB** of uncompressed float32 image
 data per 10 s of science, plus on-axis diagnostics and small metadata files.
-Float64 doubles this. Batching limits memory, not disk usage or total FFT work.
+Float64 doubles this. Cropping reduces saved image data by a factor of 16;
+the full FFTs and exposure accumulation still use 512 × 512 arrays. Batching
+limits memory, not disk usage or total FFT work.
 Benchmark a small batch before processing all 1,024 points.

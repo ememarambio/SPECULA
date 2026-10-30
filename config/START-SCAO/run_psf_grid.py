@@ -49,6 +49,11 @@ def validate_settings(settings, params):
             raise ValueError(f'{key} must be finite and positive')
     if settings['nd'] < 1:
         raise ValueError('nd must be at least 1')
+    stamp_size = settings.get('stamp_size')
+    if stamp_size is not None:
+        full_size = int(np.around(params['main']['pixel_pupil'] * settings['nd'] / 2) * 2)
+        if not isinstance(stamp_size, int) or not 1 <= stamp_size <= full_size:
+            raise ValueError('stamp_size must be a positive integer no larger than the full PSF')
     if set(settings['bands_nm']) != {'J', 'K'} or any(
             not np.isfinite(v) or v <= 0 for v in settings['bands_nm'].values()):
         raise ValueError('bands_nm must specify positive J and K wavelengths')
@@ -88,6 +93,7 @@ def add_exposures(params, settings, psf_names, positions, field_ids, output_dir)
                 'store_dir': str(Path(output_dir) / band / label),
                 'band': band, 'wavelength_nm': wavelength,
                 'pixel_size_mas': geometry.pixel_size_mas, 'n_frames': count,
+                'stamp_size': settings.get('stamp_size'),
                 'positions': np.asarray(positions).tolist(),
                 'field_ids': list(map(int, field_ids)),
                 'start_time': settings['settling_time'], 'inputs': {'in_psfs': refs},

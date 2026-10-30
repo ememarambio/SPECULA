@@ -79,10 +79,53 @@ def test_grid_and_invalid_window_lengths():
     np.testing.assert_allclose(points[[0, 31, 992, 1023]],
                                [[-10.5, -10.5], [10.5, -10.5], [-10.5, 10.5], [10.5, 10.5]])
     assert not np.any(np.all(points == 0, axis=1))
-    assert workflow.validate_settings(settings, {'main': {'time_step': 0.002}}) == (100, 5000)
+    params = {'main': {'time_step': 0.002, 'pixel_pupil': 256}}
+    assert settings['nd'] == 2.0 and settings['stamp_size'] == 128
+    assert workflow.validate_settings(settings, params) == (100, 5000)
+    settings['stamp_size'] = 513
+    with pytest.raises(ValueError, match='stamp_size'):
+        workflow.validate_settings(settings, params)
+    settings['stamp_size'] = 128
     settings['science_time'] = 9.8
     with pytest.raises(ValueError, match='whole short and long'):
-        workflow.validate_settings(settings, {'main': {'time_step': 0.002}})
+        workflow.validate_settings(settings, params)
+
+
+@pytest.mark.parametrize('band,wavelength', [('J', 1250.), ('K', 2200.)])
+def test_128_pixel_stamp_preserves_center_sampling_and_flux(tmp_path, band, wavelength):
+    from specula.lib.calc_psf import calc_psf_geometry
+
+    params = SimulParams(time_step=0.002, pixel_pupil=256, pixel_pitch=0.0309462109375)
+    geometry = calc_psf_geometry(params.pixel_pupil, params.pixel_pitch, wavelength, nd=2.)
+    image = np.zeros((512, 512))
+    image[256, 256] = 0.5
+    image[255, 257] = 0.25
+    image[0, 0] = 0.25  # Flux outside the stamp must not brighten the core.
+    value = BaseValue(value=image, target_device_idx=-1)
+    value.generation_time = 0
+    store = PsfExposureStore(params, str(tmp_path), band, wavelength, geometry.pixel_size_mas,
+                             1, [[0., 0.]], [-1], stamp_size=128)
+    store.inputs['in_psfs'].set([value])
+    store.setup()
+    assert store.check_ready(0)
+    store.trigger()
+    with fits.open(tmp_path / 'exposure_000000.fits') as hdul:
+        data, header = hdul[0].data, hdul[0].header
+        assert data.shape == (1, 128, 128)
+        np.testing.assert_array_equal(data[0], image[192:320, 192:320])
+        assert data[0, 64, 64] == 0.5
+        assert data.sum() == 0.75
+        assert header['PIXSCALE'] == pytest.approx(geometry.pixel_size_mas)
+        assert header['FOVX'] == pytest.approx(128 * geometry.pixel_size_mas / 1000)
+        assert header['FOVY'] == header['FOVX']
+        assert header['FULLNX'] == header['FULLNY'] == 512
+        assert header['CROPX0'] == header['CROPY0'] == 192
+        assert header['NORM'] == 'FULLPSF'
+    oversized = PsfExposureStore(params, str(tmp_path / 'invalid'), band, wavelength,
+                                 geometry.pixel_size_mas, 1, [[0., 0.]], [-1], stamp_size=513)
+    oversized.inputs['in_psfs'].set([value])
+    with pytest.raises(ValueError, match='stamp_size'):
+        oversized.setup()
 
 
 def test_batched_replay_matches_direct_field_psfs(tmp_path):
@@ -91,7 +134,7 @@ def test_batched_replay_matches_direct_field_psfs(tmp_path):
     # wavelengths, and a final batch smaller than batch_size.
     settings = dict(science_time=0.032, settling_time=0.004, short_frames=4,
                     long_exposure=0.016, field_width_arcsec=21., grid_size=2,
-                    batch_size=3, nd=2., bands_nm={'J': 1250., 'K': 2200.})
+                    batch_size=3, nd=2., stamp_size=8, bands_nm={'J': 1250., 'K': 2200.})
     params = {
         'main': dict(class_='SimulParams', root_dir=str(tmp_path / 'calib'),
                      total_time=0.036, time_step=0.002, pixel_pupil=8, pixel_pitch=0.1),
@@ -116,7 +159,9 @@ def test_batched_replay_matches_direct_field_psfs(tmp_path):
     for config in params.values():
         config['class'] = config.pop('class_')
     points = workflow.field_grid(settings)
-    original = workflow.batch_params(params, settings, points, range(4), tmp_path / 'direct')
+    # Compare the cropped replay to an independently saved full-size direct run.
+    full_settings = dict(settings, stamp_size=None)
+    original = workflow.batch_params(params, full_settings, points, range(4), tmp_path / 'direct')
     workflow.run_params(original, tmp_path / 'science.yml')
     (tmp_path / 'psf_grid.yml').write_text(yaml.safe_dump(settings))
     (tmp_path / 'SCIENCE_COMPLETE').touch()
@@ -127,14 +172,16 @@ def test_batched_replay_matches_direct_field_psfs(tmp_path):
         assert (batch / 'COMPLETE.json').exists()
         replay_config = yaml.safe_load((batch / 'replay.yml').read_text())
         assert 'integrator' not in replay_config  # Commands come from DataSource.
+        assert replay_config['store_J_short']['stamp_size'] == 8
         for band in ('J', 'K'):
             for label, count in [('short', 4), ('long', 2)]:
                 outputs = sorted((batch / band / label).glob('*.fits'))
                 assert len(outputs) == count
                 for path in outputs:
-                    expected = fits.getdata(tmp_path / 'direct' / band / label / path.name)[first:last]
+                    expected = fits.getdata(tmp_path / 'direct' / band / label / path.name)[first:last, 4:12, 4:12]
                     np.testing.assert_allclose(fits.getdata(path), expected, atol=2e-7, rtol=2e-6)
-                    np.testing.assert_allclose(fits.getdata(path).sum(axis=(1, 2)), 1, atol=2e-6)
+                    assert fits.getdata(path).shape == (last - first, 8, 8)
+                    assert np.all(fits.getdata(path).sum(axis=(1, 2)) < 1)
                     with fits.open(path) as hdul:
                         assert hdul[0].header['WAVELEN'] == settings['bands_nm'][band]
                         assert hdul['FIELD'].data['FIELD_ID'].tolist() == list(range(first, last))

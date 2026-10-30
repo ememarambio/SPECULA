@@ -7,6 +7,7 @@ field_width_arcsec: 21.0
 grid_size: 32
 batch_size: 16
 nd: 2.0
+stamp_size: 128  # Central crop in pixels; retain the native J/K pixel scales
 # Monochromatic representatives of J and K (no bandpass integration).
 bands_nm:
   J: 1250.0
