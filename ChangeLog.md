@@ -5,7 +5,7 @@
 
 ### New processing and data objects
 
-- ...
+- Added `PsfExposureStore` to stream synchronized PSF exposure cubes to FITS with field coordinates and exposure timing. The START-SCAO workflow records full-cadence DM commands and replays a 32×32, 21 arcsecond square field in J/K with independent 100-frame and 10-second averages.
 
 ### Interface changes
 

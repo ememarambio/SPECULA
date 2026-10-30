@@ -1,0 +1,65 @@
+# Optional on-axis displays; loaded by run_psf_grid.py run --displays.
+prop_uncorrected:
+  class: "AtmoPropagation"
+  simul_params_ref: "main"
+  source_dict_ref: ["source_science_j", "source_science_k"]
+  inputs: {atmo_layer_list: ["atmo.layer_list"],
+    common_layer_list: ["pupilstop"]}
+
+display_psf_k: &PSF_DISPLAY
+  class: 'PsfDisplay'
+  title: 'K, on axis (instantaneous)'
+  log_scale: true
+  image_p2v: 100000.0
+  window: 1
+  subplot: 211
+  figsize: [15, 9]
+  inputs: {psf: 'psf_k.out_psf'}
+
+display_psf_j:
+  <<: *PSF_DISPLAY
+  title: 'J, on axis (instantaneous)'
+  subplot: 212
+  inputs: {psf: 'psf_j.out_psf'}
+
+
+display_residual:
+  class: 'PhaseDisplay'
+  title: 'On-axis residual OPD [nm] J'
+  window: 2
+  subplot: 321
+  figsize: [15, 9]
+  inputs: {phase: 'prop.out_source_science_j_ef'}
+
+display_dm:
+  class: 'PhaseDisplay'
+  title: 'Corrective DM OPD [nm]'
+  window: 2
+  subplot: 322
+  inputs: {phase: 'dm.out_layer'}
+
+display_strehl:
+  class: 'PlotDisplay'
+  title: 'Instantaneous Strehl'
+  labels: ['K', 'J']
+  yrange: [0.0, 1.0]
+  histlen: 1000
+  window: 2
+  subplot: 323
+  inputs:
+    value_list: ['psf_k.out_sr', 'psf_j.out_sr']
+
+display_residual_rms:
+  class: 'PlotDisplay'
+  title: 'On-axis residual OPD RMS [nm], piston removed'
+  histlen: 1000
+  window: 2
+  subplot: 324
+  inputs: {value: 'residual_modes.rms'}
+
+display_detector1: &DETECTOR_DISPLAY
+  class: 'PixelsDisplay'
+  title: 'Truth WFS detector [electrons]'
+  window: 2
+  subplot: 325
+  inputs: {pixels: 'detector_truth_sh.out_pixels'}

@@ -1,0 +1,17 @@
+# A calibration bench has no turbulent input and no DM feedback.
+main_override:
+  total_time: 0.002
+prop_override:
+  inputs:
+    atmo_layer_list: []
+    common_layer_list: ['pupilstop']
+sh_subaps:
+  class: 'ShSubapCalibrator'
+  subap_on_diameter: 32
+  energy_th: 0.5
+  output_tag: 'truth_empirical_subaps_n32_p7_th0.5'
+  overwrite: true
+  inputs:
+    in_i: 'truth_sh.out_i'
+remove: ['seeing', 'wind_speed', 'wind_direction', 'atmo', 'detector_truth_sh',
+         'slopec_truth_sh', 'rec', 'integrator', 'dm', 'psf_j', 'psf_k', 'residual_modes']

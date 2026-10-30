@@ -1,0 +1,44 @@
+# Native interaction-matrix + reconstructor calibration, as in the tutorial.
+# 702 modes x two signs x 2 ms = 2.808 s of calibration time.
+# This is simulated bench time, not wall-clock time or an atmosphere change.
+main_override:
+  total_time: 2.808
+prop_override:
+  inputs:
+    atmo_layer_list: []
+    common_layer_list: ['pupilstop', 'dm.out_layer']
+dm_override:
+  sign: 1
+  inputs:
+    in_command: 'pushpull.output'
+detector_truth_sh_override:
+  photon_noise: false
+  readout_noise: false
+  darkcurrent_noise: false
+  background_noise: false
+pushpull:
+  class: 'PushPullGenerator'
+  nmodes: 702
+  amp: 10.0 # nm OPD coefficient; symmetric small-signal derivative
+  constant_amp: true
+im_calibrator:
+  class: 'ImCalibrator'
+  nmodes: 702
+  compute_single_im: false
+  im_tag: 'truth_empirical_im_702'
+  overwrite: true
+  inputs:
+    in_slopes: 'slopec_truth_sh.out_slopes'
+    in_commands: 'pushpull.output'
+  outputs: ['out_intmat']
+# Like the tutorial, reconstruct using a native calibrator in the same graph.
+# It finalizes after ImCalibrator and uses its normalized interaction matrix.
+rec_calibrator:
+  class: 'RecCalibrator'
+  nmodes: 702
+  rec_tag: 'truth_empirical_rec_702'
+  overwrite: true
+  inputs:
+    in_intmat: 'im_calibrator.out_intmat'
+remove: ['seeing', 'wind_speed', 'wind_direction', 'atmo', 'rec', 'integrator',
+         'psf_j', 'psf_k', 'residual_modes']

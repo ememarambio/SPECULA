@@ -1,0 +1,13 @@
+# Exposure times are simulation seconds, not wall-clock seconds.
+science_time: 10.0
+settling_time: 0.2
+short_frames: 100
+long_exposure: 10.0
+field_width_arcsec: 21.0
+grid_size: 32
+batch_size: 16
+nd: 2.0
+# Monochromatic representatives of J and K (no bandpass integration).
+bands_nm:
+  J: 1250.0
+  K: 2200.0

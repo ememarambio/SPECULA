@@ -1,0 +1,22 @@
+# Measure the sensor zero point with exactly the science centroid weights.
+main_override:
+  total_time: 0.002
+prop_override:
+  inputs:
+    atmo_layer_list: []
+    common_layer_list: ['pupilstop']
+detector_truth_sh_override:
+  photon_noise: false
+  readout_noise: false
+  darkcurrent_noise: false
+  background_noise: false
+slopec_truth_sh_override:
+  sn_object: null
+reference:
+  class: 'SnCalibrator'
+  output_tag: 'truth_empirical_reference'
+  overwrite: true
+  inputs:
+    in_slopes: 'slopec_truth_sh.out_slopes'
+remove: ['seeing', 'wind_speed', 'wind_direction', 'atmo', 'rec', 'integrator',
+         'dm', 'psf_j', 'psf_k', 'residual_modes']

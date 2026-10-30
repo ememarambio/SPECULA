@@ -149,3 +149,6 @@ dmypy.json
 **/*.png
 ConvolutionKernel*
 
+
+# Local empirical basis; never publish this input FITS.
+atm_dm_kl.fits

@@ -1,0 +1,171 @@
+# Native SCAO science graph using the supplied truth SHWFS and empirical modes.
+# Run this file alone for science; pair it with one calib_*.yml for a bench.
+# See README.md and run_psf_grid.py for windowed J/K exposures and field replay.
+---
+
+main:
+  class: 'SimulParams'
+  root_dir: './calib/ULTIMATE_SCAO_EMPIRICAL' # root directory for calibration files
+  pixel_pupil: 256                        # 8 pixels/lenslet in pupil space
+  pixel_pitch: 0.0309462109375            # [m/pixel] 7.92223 m / 256, from empirical FITS
+  total_time: 10.2                        # [s] 0.2 s settling + 10 s science
+  time_step: 0.002                        # [s] Simulation time step
+  zenithAngleInDeg: 0.0                   # [deg] Zenith reference case
+  display_server: false
+
+seeing:
+  class: 'WaveGenerator'
+  constant: 0.8529640040275215          # [arcsec] r0=0.118 m at 500 nm; native AtmoEvolution conversion
+
+wind_speed:
+  class: 'WaveGenerator'
+  constant: [5.6, 5.77, 6.25, 7.57, 13.31, 19.06, 12.14]  # [m/s]
+
+wind_direction:
+  class: 'WaveGenerator'
+  constant: [0.0, 50.0, 100.0, 150.0, 200.0, 250.0, 300.0]  # [deg]
+
+source_science_j:
+  class: 'Source'
+  polar_coordinates: [0.0, 0.0]            # [radius arcsec, azimuth deg]
+  magnitude: 8.0
+  wavelengthInNm: 1250.0
+  band: 'J'
+
+source_science_k:
+  class: 'Source'
+  polar_coordinates: [0.0, 0.0]            # [radius arcsec, azimuth deg]
+  magnitude: 8.0
+  wavelengthInNm: 2200.0
+  band: 'K'
+
+source_ngs:
+  class: 'Source'
+  polar_coordinates: [0.0, 0.0]
+  magnitude: 8.0
+  wavelengthInNm: 700.0
+  band: 'R'
+
+pupilstop:
+  class: 'Pupilstop'
+  simul_params_ref: 'main'
+  input_mask_data: 'truth_empirical_pupil_p256' # FITS pupil, including spiders
+
+atmo:
+  class: 'AtmoEvolution'
+  simul_params_ref: 'main'
+  L0: 20.0                               # [m] From empirical mode FITS L0_M
+  heights: [0.0, 500.0, 1000.0, 2000.0, 4000.0, 8000.0, 16000.0]  # [m] Layer heights at 0 zenith angle
+  Cn2: [0.7316, 0.0650, 0.0193, 0.0252, 0.0574, 0.0500, 0.0515]  # Cn2 weights (total must be eq 1)
+  fov: 21.0                            # [arcsec] Full square width, +/-10.5 per axis
+  seed: 1
+  inputs:
+    seeing: 'seeing.output'
+    wind_speed: 'wind_speed.output'
+    wind_direction: 'wind_direction.output'
+  outputs: ['layer_list']
+
+prop:
+  class: 'AtmoPropagation'
+  simul_params_ref: 'main'
+  source_dict_ref: ['source_science_j', 'source_science_k', 'source_ngs']
+  inputs:
+    atmo_layer_list: ['atmo.layer_list']
+    common_layer_list: ['pupilstop', 'dm.out_layer:-1']
+  outputs: ['out_source_science_j_ef', 'out_source_science_k_ef', 'out_source_ngs_ef']
+
+truth_sh:
+  class: 'SH'
+  subap_on_diameter: 32
+  subap_wanted_fov: 3.97                   # [arcsec]
+  sensor_pxscale: 0.57                    # [arcsec/pixel]
+  subap_npx: 7
+  wavelengthInNm: 700.0
+  fov_ovs_coeff: 2.0                      # (default) Numerical FFT margin
+  inputs:
+    in_ef: 'prop.out_source_ngs_ef'
+  outputs: ['out_i']
+
+detector_truth_sh:
+  class: 'CCD'
+  simul_params_ref: 'main'
+  size: [224, 224]                        # 32 lenslets x 7 pixels
+  dt: 0.002                              # [s] 500 Hz synchronized frames
+  bandw: 200.0                            # [nm] Flux bookkeeping for broadband
+  photon_noise:      true
+  readout_noise:     true
+  excess_noise:      false
+  darkcurrent_noise: true
+  background_noise:  true
+  readout_level: 1.6                      # [e-/pixel/frame rms] OrcaFlash 4.0 v2
+  quantum_eff: 0.30           # review this
+  darkcurrent_level: 0.001                  # [e-/pix/frame] = 0.5 [e-/pixel/s]
+  background_level: 0.000765 ### review this
+  inputs:
+    in_i: 'truth_sh.out_i' # Corrected object/output connection
+  outputs: ['out_pixels']
+
+slopec_truth_sh:
+  class: 'ShSlopec'
+  sn_object: 'truth_empirical_reference' # Measured noiseless flat-wavefront slopes
+  weightedPixRad: 2
+  thr_value: 0.0
+  subapdata_object: 'truth_empirical_subaps_n32_p7_th0.5'
+  inputs:
+    in_pixels: 'detector_truth_sh.out_pixels'
+  outputs: ['out_slopes']
+
+rec:
+  class: 'Modalrec'
+  recmat_object: 'truth_empirical_rec_702'
+  inputs:
+    in_slopes: 'slopec_truth_sh.out_slopes'
+
+integrator:
+  class: 'Integrator'
+  delay: 2
+  int_gain: [0.3]
+  ff: [0.99]
+  n_modes: [702]
+  inputs:
+    delta_comm: 'rec.out_modes'
+  outputs: ['out_comm']
+
+dm:
+  class: 'DM'
+  simul_params_ref: 'main'
+  ifunc_object: 'truth_empirical_modes702_p256' # Already modal OPD; no M2C
+  nmodes: 702
+  height: 0.0
+  sign: -1 # Explicit native default: positive command subtracts OPD
+  inputs:
+    in_command: 'integrator.out_comm'
+  outputs: ['out_layer']
+
+
+psf_j:
+  class: 'PSF'
+  simul_params_ref: 'main'
+  wavelengthInNm: 1250.0                  # [nm] J band
+  nd: 2.0                                # Numerical PSF sampling
+  start_time: 0.2                         # [s] Discard loop settling transient
+  inputs:
+    in_ef: 'prop.out_source_science_j_ef'
+  outputs: ['out_psf']
+
+psf_k:
+  class: 'PSF'
+  simul_params_ref: 'main'
+  wavelengthInNm: 2200.0                  # [nm] K band
+  nd: 2.0                                # Numerical PSF sampling
+  start_time: 0.2                         # [s] Discard loop settling transient
+  inputs:
+    in_ef: 'prop.out_source_science_k_ef'
+  outputs: ['out_psf']
+
+residual_modes:
+  class: 'ModalAnalysis'
+  ifunc_inv_object: 'truth_empirical_modes702_p256_inv' # Inverse of the driven modal shapes
+  inputs:
+    in_ef: 'prop.out_source_science_j_ef'
+  outputs: ['out_modes']
