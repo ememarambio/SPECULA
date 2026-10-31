@@ -104,6 +104,12 @@ full PSF's unit flux. Set `stamp_size: null` to save the full calculated image.
 The same crop applies to on-axis and field PSFs in both exposure windows and
 both bands. Display images continue to show the full instantaneous PSF.
 
+The writer uses the simulation device so readiness checks read the window
+timestamps without copying their image buffers. Completed stamps are cropped
+on that device and then transferred to the CPU for FITS output. There are no
+full-size CPU mirror buffers for the window outputs. If configuring processing
+objects on different devices manually, keep each writer on its producers' device.
+
 For example, short exposure 0 covers [0.2, 0.4), exposure 1 covers [0.4, 0.6),
 and long exposure 0 covers [0.2, 10.2). The internal producer timestamp labels
 the final sample (0.398 s for the first short exposure); FITS records the actual

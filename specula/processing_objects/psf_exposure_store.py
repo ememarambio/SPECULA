@@ -25,14 +25,20 @@ class PsfExposureStore(BaseProcessingObj):
     ``stamp_size`` optionally crops each image about its FFT center before
     writing. The pixel scale and full-PSF normalization are preserved; cropped
     stamps are not renormalized, so their sums give the retained flux fraction.
+    Keep the writer on the same device as its window producers (the default
+    uses the simulation device). Input checks then read references and timestamps
+    without transferring arrays; only completed stamps are copied to the CPU.
     """
 
     def __init__(self, simul_params: SimulParams, store_dir: str, band: str,
                  wavelength_nm: float, pixel_size_mas: float, n_frames: int,
                  positions: list, field_ids: list, start_time: float = 0,
-                 stamp_size: int = None):
-        # Disk I/O runs on CPU; InputList transfers only completed exposures.
-        super().__init__(target_device_idx=-1)
+                 stamp_size: int = None, target_device_idx: int = None):
+        # InputList.get() transfers arrays to the consumer's device even during
+        # readiness checks. Stay on the simulation device to avoid copying full
+        # window buffers to the CPU on every step. trigger_code() crops on-device
+        # before cpuArray() performs the only transfer needed for FITS output.
+        super().__init__(target_device_idx=target_device_idx)
         if int(n_frames) != n_frames or n_frames < 1:
             raise ValueError('n_frames must be a positive integer')
         self.loop_dt = self.seconds_to_t(simul_params.time_step)

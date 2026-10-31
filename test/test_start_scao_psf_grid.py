@@ -3,6 +3,7 @@
 import argparse
 import importlib.util
 from pathlib import Path
+from unittest.mock import patch
 
 import numpy as np
 import pytest
@@ -17,6 +18,7 @@ from specula.base_value import BaseValue
 from specula.data_objects.simul_params import SimulParams
 from specula.processing_objects.psf_exposure_store import PsfExposureStore
 from specula.processing_objects.windowed_integration import WindowedIntegration
+import specula.processing_objects.psf_exposure_store as exposure_store_module
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,6 +72,62 @@ def test_nonoverlapping_exposures_stream_with_exact_times(tmp_path):
     assert fits.getheader(long_files[0])['EXPTIME'] == 10.0
     with pytest.raises(FileExistsError):
         stores[0].setup()
+
+
+@pytest.mark.parametrize('device', [
+    -1,
+    pytest.param(0, marks=pytest.mark.skipif(specula.cp is None, reason='CuPy/GPU unavailable')),
+])
+def test_writer_transfers_only_completed_stamps(tmp_path, monkeypatch, device):
+    import iteras
+
+    # Exercise the same default-device wiring used by the YAML workflow. On GPU,
+    # the old forced-CPU writer fails these guards during setup/readiness checks.
+    monkeypatch.setattr(iteras, 'default_target_device_idx', device)
+    xp = np if device == -1 else specula.cp
+    params = SimulParams(time_step=0.002)
+    values = [BaseValue(value=xp.zeros((512, 512), dtype=xp.float32),
+                        target_device_idx=device, precision=1) for _ in range(2)]
+    windows = [WindowedIntegration(params, [512, 512], dt=0.2, start_time=0.2,
+                                  update_time_on_dt=True, target_device_idx=device,
+                                  precision=1) for _ in values]
+    for window, value in zip(windows, values):
+        window.inputs['input'].set(value)
+        window.setup()
+    store = PsfExposureStore(params, str(tmp_path), 'J', 1250., 16.27, 100,
+                             [[0., 0.], [1., 1.]], [0, 1], start_time=0.2, stamp_size=128)
+    store.inputs['in_psfs'].set([w.output for w in windows])
+    with patch.object(BaseValue, 'copyTo', side_effect=AssertionError('Full buffer cloned')), \
+         patch.object(BaseValue, 'transferDataTo', side_effect=AssertionError('Full buffer transferred')), \
+         patch.object(exposure_store_module, 'cpuArray', wraps=specula.cpuArray) as to_cpu:
+        store.setup()
+        assert store.target_device_idx == device
+        for step in range(300):  # 100 settling frames, two complete 100-frame windows.
+            t = store.seconds_to_t(step * 0.002)
+            for i, (value, window) in enumerate(zip(values, windows)):
+                value.value[:] = -999 if step < 100 else (step - 100) // 100 + i + 1
+                value.generation_time = t
+                assert window.check_ready(t)
+                window.trigger()
+                window.post_trigger()
+            previous_calls = to_cpu.call_count
+            ready = store.check_ready(t)
+            assert to_cpu.call_count == previous_calls  # Readiness never copies a PSF.
+            if ready:
+                store.trigger()
+                store.post_trigger()
+            assert to_cpu.call_count == (0 if step < 199 else 2 if step < 299 else 4)
+        store.finalize()
+        assert to_cpu.call_count == 4
+        assert all(call.args[0].shape == (128, 128) for call in to_cpu.call_args_list)
+        assert sum(call.args[0].nbytes for call in to_cpu.call_args_list) == 4 * 128**2 * 4
+        assert all(item.cloned_value is window.output
+                   for item, window in zip(store.inputs['in_psfs'].input_values, windows))
+    for i in range(2):
+        data = fits.getdata(tmp_path / f'exposure_{i:06d}.fits')
+        assert data.shape == (2, 128, 128)
+        for j in range(2):
+            np.testing.assert_allclose(data[j], i + j + 1, rtol=2e-6)
 
 
 def test_grid_and_invalid_window_lengths():
