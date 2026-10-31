@@ -110,3 +110,29 @@ def test_stamp_averages_match_full_psf_crop(device, stamp):
             np.testing.assert_array_equal(cpuArray(small.output.value), retained)
             assert small.output.generation_time == 4 * small.loop_dt
     assert small.output.value.shape == small.integrated_value.shape == (stamp, stamp)
+
+
+@pytest.mark.parametrize('device', DEVICES)
+def test_psf_only_mode_matches_full_psf_without_statistics_buffers(device):
+    params = SimulParams(pixel_pupil=8, pixel_pitch=.1)
+    ef = ElectricField(8, 8, .1, target_device_idx=device)
+    standard = DatasetPSF(params, 1250., nd=2., target_device_idx=device)
+    fast = DatasetPSF(params, 1250., nd=2., target_device_idx=device, compute_statistics=False)
+    for obj in (standard, fast):
+        obj.inputs['in_ef'].set(ef)
+        obj.setup()
+    for step in range(3):
+        ef.phaseInNm[:] = np.arange(64).reshape(8, 8) * step
+        ef.generation_time = step * fast.seconds_to_t(.002)
+        for obj in (standard, fast):
+            obj.check_ready(ef.generation_time)
+            obj.trigger()
+            obj.post_trigger()
+        np.testing.assert_allclose(cpuArray(fast.psf.value), cpuArray(standard.psf.value))
+        assert fast.psf.generation_time == ef.generation_time
+    fast.finalize()
+    assert fast.ref is fast._sum_psf_squared is None
+    for name in ('int_psf', 'std_psf', 'sr', 'int_sr'):
+        assert getattr(fast, name).value is None
+    with pytest.raises(ValueError, match='Profile metrics require'):
+        DatasetPSF(params, 1250., nd=2., compute_statistics=False, compute_profile_metrics=True)

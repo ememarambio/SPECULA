@@ -126,6 +126,7 @@ def add_direct_dataset(params, settings, run_dir, shard_size=4, max_shard_bytes=
     sources, names = [], {'J': ['psf_j'], 'K': ['psf_k']}
     for name in ('psf_j', 'psf_k'):
         params[name]['class'] = 'DatasetPSF'
+        params[name]['compute_statistics'] = 'display_strehl' in params
     for i, (x, y) in enumerate(points):
         source = f'field_{i}'
         sources.append(source)
@@ -141,6 +142,7 @@ def add_direct_dataset(params, settings, run_dir, shard_size=4, max_shard_bytes=
                 'class': 'DatasetPSF', 'simul_params_ref': 'main', 'wavelengthInNm': wavelength,
                 'nd': settings['nd'], 'start_time': settings['settling_time'],
                 'compute_profile_metrics': False,
+                'compute_statistics': False,
                 'inputs': {'in_ef': f'prop.out_{source}_ef'},
             }
     params['prop']['source_dict_ref'].extend(sources)

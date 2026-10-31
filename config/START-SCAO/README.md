@@ -88,6 +88,10 @@ The full-size GPU run has not been profiled; validation uses small CPU fields.
 
 The dataset uses `DatasetPSF` for lazy GPU diagnostic logging and
 `PsfStampIntegration` to crop each normalized PSF before exposure accumulation.
+Dataset PSFs disable unused Strehl and cumulative statistics with
+`compute_statistics: false`; the two on-axis PSFs retain statistics when
+`--displays` requests the Strehl plot. The default `DatasetPSF` API still
+provides all standard PSF outputs.
 The original `PSF` and `WindowedIntegration` classes remain available. The stamp
 accumulators reset after each completed window; their output timestamp updates
 only at an exposure boundary and their output retains the last completed image. Only completed windows
