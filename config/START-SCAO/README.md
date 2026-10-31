@@ -80,7 +80,7 @@ atmosphere and delayed DM state in the live AO loop.
 
 This computes **all 1,024 grid points plus on-axis in both J and K during the
 same AO simulation**. Each completed
-100-step sample is written through `webdataset.ShardWriter` immediately;
+100-step sample is queued for writing through `webdataset.ShardWriter`;
 there is no replay, FITS/NPZ staging, command-history file, or export pass.
 The full PSF calculations and cropped exposure buffers must fit on the selected device.
 Use float32 (`--precision 1`, the default) for the planned 40 GB A100 run.
@@ -107,8 +107,17 @@ the window boundary. Each PSF band is transferred as one field cube. Timestamp
 and shape checks still run every step; static-pupil and finite-value checks are
 resolved before publishing each window. This adds about 45 MiB of device
 telemetry storage with the default float32 shapes. The writer defaults to its
-original per-frame capture and per-field transfers when used independently. Only completed windows
-are written. For the default timing, short exposure 0 covers [0.2, 0.4), short
+original per-frame capture and per-field transfers when used independently.
+
+The workflow also opts into `background_writes`: one host worker encodes NumPy
+arrays and writes both shard streams while the simulation continues. Snapshots
+own their data, and the queue holds at most one waiting sample in addition to
+the active write. A full queue applies backpressure. Worker failures propagate
+to the simulation; finalization drains the queue before closing shards and
+publishing manifests. Abort joins the worker and retains partial-shard marking.
+The standalone writer default remains synchronous.
+
+Only completed windows are written. For the default timing, short exposure 0 covers [0.2, 0.4), short
 exposure 1 covers [0.4, 0.6), and long exposure 0 covers [0.2, 10.2).
 
 `stamp_size: 128` crops about the FFT center at the native `nd: 2.0` sampling.

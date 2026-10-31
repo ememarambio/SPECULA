@@ -2,6 +2,8 @@
 
 import io
 import json
+import queue
+import threading
 import uuid
 from pathlib import Path
 
@@ -64,6 +66,66 @@ class _ShardStream:
             self.writer.close()
 
 
+class _BackgroundWriter:
+    """One worker and one queued sample; propagate errors to the simulation.
+
+    Only host snapshots enter this queue. The worker never accesses simulation
+    objects or CUDA state. Draining precedes shard closure and manifest creation.
+    """
+
+    def __init__(self):
+        self.queue = queue.Queue(maxsize=1)
+        self.cancelled = threading.Event()
+        self.error = None
+        self.closed = False
+        self.thread = threading.Thread(target=self._run, name='scao-webdataset-writer')
+        self.thread.start()
+
+    def check(self):
+        if self.error is not None:
+            raise self.error
+
+    def submit(self, stream, sample):
+        if self.closed:
+            raise RuntimeError('Background writer is closed')
+        while True:
+            self.check()
+            try:
+                self.queue.put((stream, sample), timeout=.05)
+                break
+            except queue.Full:
+                continue
+        self.check()
+
+    def _run(self):
+        while True:
+            item = self.queue.get()
+            try:
+                if item is None:
+                    return
+                if self.cancelled.is_set() or self.error is not None:
+                    continue
+                stream, sample = item
+                try:
+                    encoded = {key: npy_bytes(value) if isinstance(value, np.ndarray) else value
+                               for key, value in sample.items()}
+                    stream.write(encoded)
+                except BaseException as error:
+                    self.error = error
+            finally:
+                self.queue.task_done()
+
+    def close(self, abort=False):
+        if abort:
+            self.cancelled.set()
+        if not self.closed:
+            self.queue.put(None)
+            self.thread.join()
+            self.closed = True
+        if not abort:
+            self.check()
+
+
 class ScaoWebdatasetStore(BaseProcessingObj):
     """One 100-step telemetry sample with full-field J/K PSFs, written in place.
 
@@ -81,7 +143,8 @@ class ScaoWebdatasetStore(BaseProcessingObj):
                  long_frames: int = 5000, start_time: float = .2,
                  shard_size: int = 4, max_shard_bytes: int = 1073741824,
                  dm_sign: int = -1, target_device_idx: int = None,
-                 psfs_are_stamps: bool = False, device_buffering: bool = False):
+                 psfs_are_stamps: bool = False, device_buffering: bool = False,
+                 background_writes: bool = False):
         super().__init__(target_device_idx=target_device_idx)
         if set(bands_nm) != {'J', 'K'} or any(not np.isfinite(v) or v <= 0 for v in bands_nm.values()):
             raise ValueError('Expected positive J/K wavelengths')
@@ -106,6 +169,8 @@ class ScaoWebdatasetStore(BaseProcessingObj):
         self._device_buffers = None
         self._device_pupil = None
         self._pupil_changed = None
+        self.background_writes = background_writes
+        self._background = None
         self.inputs['in_commands'] = InputValue(type=BaseValue)
         self.inputs['in_applied_commands'] = InputValue(type=BaseValue)
         self.inputs['in_pixels'] = InputValue(type=Pixels)
@@ -205,6 +270,8 @@ class ScaoWebdatasetStore(BaseProcessingObj):
             self.streams['short'] = _ShardStream(self.store_dir, self.shard_size, self.max_shard_bytes)
             self.streams['long'] = _ShardStream(self.store_dir / 'long_exposures',
                                                self.shard_size, self.max_shard_bytes)
+            if self.background_writes:
+                self._background = _BackgroundWriter()
         except BaseException:
             self.abort()
             raise
@@ -346,10 +413,20 @@ class ScaoWebdatasetStore(BaseProcessingObj):
                 cube = np.stack([cpuArray(self._psf_stamp(p)) for p in psfs])
             if not np.isfinite(cube).all():
                 raise ValueError('PSF targets must be finite')
-            members[f'psf_{band.lower()}.npy'] = npy_bytes(cube)
-        members['field_ids.npy'] = npy_bytes(self.field_ids)
-        members['field_xy_arcsec.npy'] = npy_bytes(self.positions)
+            members[f'psf_{band.lower()}.npy'] = self._array_member(cube)
+        members['field_ids.npy'] = self._array_member(self.field_ids)
+        members['field_xy_arcsec.npy'] = self._array_member(self.positions)
         return members
+
+    def _array_member(self, value):
+        # Capture ownership before the simulation reuses its next window.
+        return value.copy() if self.background_writes else npy_bytes(value)
+
+    def _write_sample(self, label, sample):
+        if self._background is not None:
+            self._background.submit(self.streams[label], sample)
+        else:
+            self.streams[label].write(sample)
 
     def _psf_input_shape(self):
         size = self.stamp_size if self.psfs_are_stamps else self.full_size
@@ -367,13 +444,15 @@ class ScaoWebdatasetStore(BaseProcessingObj):
 
     def _write_window(self):
         sample = self._psf_members('short')
-        sample.update({f'{name}.npy': npy_bytes(value) for name, value in self.buffers.items()})
-        sample['pupil.npy'] = npy_bytes(self.pupil)
+        sample.update({f'{name}.npy': self._array_member(value) for name, value in self.buffers.items()})
+        sample['pupil.npy'] = self._array_member(self.pupil)
         sample['__key__'] = f"{self.metadata['run_id']}_{self.windows:06d}"
         sample['meta.json'] = json.dumps(self._sample_metadata(100, self.windows, 'training')).encode()
-        self.streams['short'].write(sample)
+        self._write_sample('short', sample)
 
     def trigger_code(self):
+        if self._background is not None:
+            self._background.check()
         self._capture_step()
         if self.current_time < self.start:
             return
@@ -382,7 +461,7 @@ class ScaoWebdatasetStore(BaseProcessingObj):
             sample['__key__'] = f"{self.metadata['run_id']}_long_{self.long_windows:06d}"
             sample['meta.json'] = json.dumps(
                 self._sample_metadata(self.long_frames, self.long_windows, 'long_psf')).encode()
-            self.streams['long'].write(sample)
+            self._write_sample('long', sample)
             self.long_windows += 1
 
     def finalize(self):
@@ -390,6 +469,8 @@ class ScaoWebdatasetStore(BaseProcessingObj):
             self._validate_complete()
             if self.long_windows * self.long_frames * self.step != self.end - self.start:
                 raise ValueError('Incomplete long PSF exposure stream')
+            if self._background is not None:
+                self._background.close()
             for stream in self.streams.values():
                 stream.close()
             for label, count in [('long', self.long_windows), ('short', self.windows)]:
@@ -408,6 +489,11 @@ class ScaoWebdatasetStore(BaseProcessingObj):
 
     def abort(self):
         """Close open handles without publishing partial shards or a manifest."""
+        # Prevent an in-flight write from publishing a rolling shard on abort.
+        for stream in self.streams.values():
+            stream.failed = True
+        if self._background is not None:
+            self._background.close(abort=True)
         for stream in self.streams.values():
             try:
                 stream.close(abort=True)

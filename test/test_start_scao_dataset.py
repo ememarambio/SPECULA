@@ -134,10 +134,16 @@ def test_samples_preserve_actual_frames_commands_phases_and_full_field(physical_
         np.testing.assert_array_equal(sample['time_ticks.npy'], steps * 2_000_000)
         np.testing.assert_array_equal(sample['dm_command_time_ticks.npy'], (steps - 1) * 2_000_000)
         # These known, time-varying commands independently verify the DM lag.
+        # WaveGenerator arithmetic rounds before capture. Allow its float32
+        # cancellation error near zero without relaxing the step-alignment test.
+        calculation_dtype = np.float32 if sample['meta.json']['global_precision'] == 1 else np.float64
+        command_atol = 64 * np.finfo(calculation_dtype).eps
         np.testing.assert_allclose(sample['controller_commands.npy'],
-                                   [20., -30.] + steps[:, None] * .002 * [400., 200.])
+                                   [20., -30.] + steps[:, None] * .002 * [400., 200.],
+                                   atol=command_atol)
         np.testing.assert_allclose(sample['dm_commands.npy'],
-                                   [20., -30.] + (steps[:, None] - 1) * .002 * [400., 200.])
+                                   [20., -30.] + (steps[:, None] - 1) * .002 * [400., 200.],
+                                   atol=command_atol)
         np.testing.assert_array_equal(sample['shwfs_frames.npy'], frames[first:first + 100])
         np.testing.assert_allclose(sample['residual_phase.npy'], phases[first:first + 100], rtol=2e-7)
         np.testing.assert_array_equal(sample['field_ids.npy'], [-1, 0, 1, 2, 3])
@@ -357,6 +363,17 @@ def test_configured_closed_loop_order_and_full_grid(tmp_path):
         assert len(refs) == 1025
         assert params[f'exposure_{band}_short_0']['inputs']['input'] == f'psf_{band.lower()}.out_psf'
         assert params[f'psf_{band}_0']['inputs']['in_ef'] == 'prop.out_field_0_ef'
+        assert params[f'psf_{band}_0']['class'] == 'DatasetPSF'
+        assert params[f'psf_{band}_0']['compute_statistics'] is False
+        assert params[f'exposure_{band}_short_0']['stamp_size'] == 128
+        assert params[f'exposure_{band}_long_0']['class'] == 'CompletedExposureIntegration'
+        assert params[f'exposure_{band}_long_0']['inputs']['input'] == f'exposure_{band}_short_0.output'
+    for option in ('psfs_are_stamps', 'device_buffering', 'background_writes'):
+        assert params['dataset'][option] is True
+    assert params['psf_j']['compute_statistics'] is False
+    small['display_strehl'] = {'class': 'PlotDisplay'}
+    workflow.add_direct_dataset(small, {**settings, 'grid_size': 2}, tmp_path)
+    assert small['psf_j']['compute_statistics'] is True
 
 
 @pytest.mark.parametrize('problem', ['stale_frame', 'current_dm', 'gap'])

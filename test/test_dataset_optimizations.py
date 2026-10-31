@@ -265,3 +265,129 @@ def test_device_capture_validates_before_publishing(tmp_path, problem):
         store.abort()
     assert not list(store.store_dir.rglob('*.tar'))
     assert not list(store.store_dir.rglob('dataset.json'))
+
+
+@pytest.mark.parametrize('device_buffering', [False, True])
+def test_background_writer_owns_snapshots_and_drains_both_streams(tmp_path, device_buffering):
+    import threading
+    from unittest.mock import patch
+    from test.test_start_scao_dataset import direct_inputs, step_capture, read_shards
+    *objects, psfs = direct_inputs(tmp_path / 'dataset')
+    store = objects[0]
+    store.background_writes = True
+    store.device_buffering = device_buffering
+    store.setup()
+    entered, release = threading.Event(), threading.Event()
+    write = store.streams['short'].write
+
+    def blocked_write(sample):
+        entered.set()
+        assert release.wait(5), 'Test worker was not released'
+        write(sample)
+
+    try:
+        with patch.object(store.streams['short'], 'write', side_effect=blocked_write):
+            for step in range(202):
+                if step in (101, 201):
+                    for key, values in psfs.items():
+                        if 'short' in key or step == 201:
+                            for value in values:
+                                value.generation_time = step * store.step
+                if step == 102:
+                    assert entered.wait(5)
+                    # Mutate the live sources while the first sample is pending.
+                    for values in psfs.values():
+                        for value in values:
+                            value.value[:] *= 2
+                    # Release before the second short+long pair needs the queue.
+                    release.set()
+                step_capture(*objects, step)
+            store.finalize()
+    finally:
+        release.set()
+        store.abort()
+    assert not store._background.thread.is_alive()
+    _, samples = read_shards(store.store_dir)
+    _, long_samples = read_shards(store.store_dir / 'long_exposures')
+    assert len(samples) == 2 and len(long_samples) == 1
+    np.testing.assert_array_equal(samples[0]['shwfs_frames.npy'][:, 0, 0], np.arange(2, 102))
+    np.testing.assert_array_equal(samples[1]['shwfs_frames.npy'][:, 0, 0], np.arange(102, 202))
+    assert samples[0]['psf_j.npy'].sum() == pytest.approx(1.25)
+    assert samples[1]['psf_j.npy'].sum() == pytest.approx(2.5)
+
+
+def test_background_queue_is_bounded_and_propagates_worker_failure():
+    import threading
+    from specula.processing_objects.scao_webdataset_store import _BackgroundWriter
+    entered, release, third_returned = threading.Event(), threading.Event(), threading.Event()
+
+    class SlowStream:
+        def write(self, sample):
+            entered.set()
+            assert release.wait(5)
+            raise OSError('disk full')
+
+    writer = _BackgroundWriter()
+    errors = []
+    try:
+        writer.submit(SlowStream(), {'x.npy': np.zeros(4)})
+        assert entered.wait(5)
+        writer.submit(SlowStream(), {'x.npy': np.zeros(4)})
+
+        def submit_third():
+            try:
+                writer.submit(SlowStream(), {'x.npy': np.zeros(4)})
+            except OSError as error:
+                errors.append(str(error))
+            finally:
+                third_returned.set()
+
+        producer = threading.Thread(target=submit_third)
+        producer.start()
+        assert not third_returned.wait(.05)
+        assert writer.queue.qsize() == writer.queue.maxsize == 1
+        release.set()
+        assert third_returned.wait(5)
+        producer.join()
+        with pytest.raises(OSError, match='disk full'):
+            writer.close()
+        assert errors == ['disk full']
+    finally:
+        release.set()
+        writer.close(abort=True)
+    assert not writer.thread.is_alive()
+
+
+@pytest.mark.parametrize('failure', ['write', 'encoding', 'interruption'])
+def test_background_failure_aborts_without_manifests_or_worker_leaks(tmp_path, failure):
+    from unittest.mock import patch
+    import specula.processing_objects.scao_webdataset_store as module
+    from test.test_start_scao_dataset import direct_inputs, step_capture
+    *objects, psfs = direct_inputs(tmp_path / 'dataset')
+    store = objects[0]
+    store.background_writes = True
+    store.setup()
+    for key, values in psfs.items():
+        for value in values:
+            value.generation_time = 101 * store.step
+    try:
+        for step in range(101):
+            step_capture(*objects, step)
+        if failure == 'write':
+            target, name = store.streams['short'].writer, 'write'
+        else:
+            target, name = module, 'npy_bytes'
+        if failure == 'interruption':
+            step_capture(*objects, 101)
+            store.abort()
+        else:
+            with patch.object(target, name, side_effect=OSError('worker failed')):
+                with pytest.raises(OSError, match='worker failed'):
+                    step_capture(*objects, 101)
+                    store._background.close()
+    finally:
+        store.abort()
+    assert not store._background.thread.is_alive()
+    assert all(s.closed for s in store.streams.values())
+    assert not list(store.store_dir.rglob('dataset.json'))
+    assert not list(store.store_dir.rglob('*.tar'))
