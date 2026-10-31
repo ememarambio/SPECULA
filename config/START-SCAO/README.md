@@ -82,13 +82,15 @@ This computes **all 1,024 grid points plus on-axis in both J and K during the
 same AO simulation**. Each completed
 100-step sample is written through `webdataset.ShardWriter` immediately;
 there is no replay, FITS/NPZ staging, command-history file, or export pass.
-The full PSF calculations and exposure buffers must fit on the selected device.
+The full PSF calculations and cropped exposure buffers must fit on the selected device.
 Use float32 (`--precision 1`, the default) for the planned 40 GB A100 run.
 The full-size GPU run has not been profiled; validation uses small CPU fields.
 
-Each instantaneous PSF feeds two independent `WindowedIntegration` objects.
-They clear their intensity accumulators after each completed window; their
-output timestamp updates only at an exposure boundary. Only completed windows
+The dataset uses `DatasetPSF` for lazy GPU diagnostic logging and
+`PsfStampIntegration` to crop each normalized PSF before exposure accumulation.
+The original `PSF` and `WindowedIntegration` classes remain available. The stamp
+accumulators reset after each completed window; their output timestamp updates
+only at an exposure boundary and their output retains the last completed image. Only completed windows
 are written. For the default timing, short exposure 0 covers [0.2, 0.4), short
 exposure 1 covers [0.4, 0.6), and long exposure 0 covers [0.2, 10.2).
 

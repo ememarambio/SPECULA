@@ -70,6 +70,7 @@ def add_psf_windows(params, settings, psf_names):
     short, long = validate_settings(settings, params)
     main = params['main']
     size = int(np.around(main['pixel_pupil'] * settings['nd'] / 2) * 2)
+    stamp = settings.get('stamp_size') or size
     windows = {}
     for band in ('J', 'K'):
         for label, count in [('short', short), ('long', long)]:
@@ -77,9 +78,9 @@ def add_psf_windows(params, settings, psf_names):
             for i, psf in enumerate(psf_names[band]):
                 name = f'exposure_{band}_{label}_{i}'
                 params[name] = {
-                    'class': 'WindowedIntegration', 'simul_params_ref': 'main',
-                    'n_elem': [size, size], 'dt': count * main['time_step'],
-                    'start_time': settings['settling_time'], 'update_time_on_dt': True,
+                    'class': 'PsfStampIntegration', 'simul_params_ref': 'main',
+                    'full_size': size, 'stamp_size': stamp, 'dt': count * main['time_step'],
+                    'start_time': settings['settling_time'],
                     'inputs': {'input': f'{psf}.out_psf'},
                 }
                 refs.append(f'{name}.output')
@@ -151,6 +152,7 @@ def add_direct_dataset(params, settings, run_dir, shard_size=4, max_shard_bytes=
         'grid_size': settings['grid_size'], 'field_width_arcsec': settings['field_width_arcsec'],
         'bands_nm': settings['bands_nm'], 'nd': settings['nd'],
         'stamp_size': settings.get('stamp_size'), 'n_frames': settings['short_frames'],
+        'psfs_are_stamps': True,
         'long_frames': frame_count(settings['long_exposure'], params['main']['time_step'], 'long_exposure'),
         'start_time': settings['settling_time'], 'dm_sign': params['dm'].get('sign', -1),
         'shard_size': shard_size, 'max_shard_bytes': max_shard_bytes,

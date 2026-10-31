@@ -72,3 +72,41 @@ def test_disabled_psf_logging_never_formats_device_scalar(monkeypatch):
     obj.trigger_code()
     obj.logger.isEnabledFor.assert_called_once_with(logging.INFO)
     obj.logger.info.assert_not_called()
+
+
+@pytest.mark.parametrize('device', DEVICES)
+@pytest.mark.parametrize('stamp', [3, 4, 8])
+def test_stamp_averages_match_full_psf_crop(device, stamp):
+    from specula.base_value import BaseValue
+    from iteras.processing_objects.windowed_integration import WindowedIntegration
+    from specula.processing_objects.psf_stamp_integration import PsfStampIntegration
+    xp = np if device < 0 else specula.cp
+    params = SimulParams(time_step=.002)
+    source = BaseValue(value=xp.zeros((8, 8)), target_device_idx=device)
+    full = WindowedIntegration(params, [8, 8], .006, start_time=.004,
+                               update_time_on_dt=True, target_device_idx=device)
+    small = PsfStampIntegration(params, 8, stamp, .006, start_time=.004,
+                               target_device_idx=device)
+    for obj in (full, small):
+        obj.inputs['input'].set(source)
+        obj.setup()
+    retained = None
+    for step in range(8):
+        source.value[:] = xp.arange(64).reshape(8, 8) + step
+        source.value /= source.value.sum()
+        tick = step * small.loop_dt
+        source.generation_time = tick
+        for obj in (full, small):
+            obj.check_ready(tick)
+            obj.trigger()
+            obj.post_trigger()
+        if step in (4, 7):
+            np.testing.assert_allclose(cpuArray(small.output.value),
+                                       cpuArray(full.output.value[small.stamp_slice]), rtol=2e-6)
+            assert small.output.generation_time == tick
+            retained = cpuArray(small.output.value, force_copy=True)
+            assert retained.sum() <= 1 + 1e-6
+        elif step >= 5:
+            np.testing.assert_array_equal(cpuArray(small.output.value), retained)
+            assert small.output.generation_time == 4 * small.loop_dt
+    assert small.output.value.shape == small.integrated_value.shape == (stamp, stamp)

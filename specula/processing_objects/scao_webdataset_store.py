@@ -80,7 +80,8 @@ class ScaoWebdatasetStore(BaseProcessingObj):
                  stamp_size: int = 128, n_frames: int = 100,
                  long_frames: int = 5000, start_time: float = .2,
                  shard_size: int = 4, max_shard_bytes: int = 1073741824,
-                 dm_sign: int = -1, target_device_idx: int = None):
+                 dm_sign: int = -1, target_device_idx: int = None,
+                 psfs_are_stamps: bool = False):
         super().__init__(target_device_idx=target_device_idx)
         if set(bands_nm) != {'J', 'K'} or any(not np.isfinite(v) or v <= 0 for v in bands_nm.values()):
             raise ValueError('Expected positive J/K wavelengths')
@@ -134,6 +135,7 @@ class ScaoWebdatasetStore(BaseProcessingObj):
             raise ValueError('stamp_size must fit within the full PSF')
         self.crop = self.full_size // 2 - self.stamp_size // 2
         self.stamp_slice = (slice(self.crop, self.crop + self.stamp_size),) * 2
+        self.psfs_are_stamps = psfs_are_stamps
         self.scales = {band: calc_psf_geometry(simul_params.pixel_pupil, simul_params.pixel_pitch,
                                               wavelength, nd=nd).pixel_size_mas
                        for band, wavelength in self.bands.items()}
@@ -179,8 +181,8 @@ class ScaoWebdatasetStore(BaseProcessingObj):
             for band in ('J', 'K'):
                 psfs = self.local_inputs[f'in_{label}_{band}']
                 if (len(psfs) != len(self.field_ids)
-                        or any(p.value.shape != (self.full_size, self.full_size) for p in psfs)):
-                    raise ValueError('Expected one full-size PSF per field point, including on-axis')
+                        or any(p.value.shape != self._psf_input_shape() for p in psfs)):
+                    raise ValueError('Expected one correctly sized PSF per field point, including on-axis')
         self.store_dir.mkdir(parents=True, exist_ok=False)
         self.metadata.update({
             'global_precision': int(self.precision), 'random_seeds': self.resolved_seeds,
@@ -275,13 +277,20 @@ class ScaoWebdatasetStore(BaseProcessingObj):
             psfs = self.local_inputs[f'in_{label}_{band}']
             if any(p.generation_time != self.current_time for p in psfs):
                 raise ValueError(f'{label} {band} PSFs do not match the completed telemetry exposure')
-            cube = np.stack([cpuArray(p.value[self.stamp_slice]) for p in psfs])
+            cube = np.stack([cpuArray(self._psf_stamp(p)) for p in psfs])
             if not np.isfinite(cube).all():
                 raise ValueError('PSF targets must be finite')
             members[f'psf_{band.lower()}.npy'] = npy_bytes(cube)
         members['field_ids.npy'] = npy_bytes(self.field_ids)
         members['field_xy_arcsec.npy'] = npy_bytes(self.positions)
         return members
+
+    def _psf_input_shape(self):
+        size = self.stamp_size if self.psfs_are_stamps else self.full_size
+        return (size, size)
+
+    def _psf_stamp(self, psf):
+        return psf.value if self.psfs_are_stamps else psf.value[self.stamp_slice]
 
     def _sample_metadata(self, frames, index, kind):
         end = self.current_time + self.step
