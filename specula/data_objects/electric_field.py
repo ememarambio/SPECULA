@@ -1,8 +1,8 @@
 from astropy.io import fits
 import numpy as np
 
-from specula import cpuArray
 from specula.base_data_obj import BaseDataObj
+from iteras.lib import storage
 
 
 class ElectricField(BaseDataObj):
@@ -11,6 +11,7 @@ class ElectricField(BaseDataObj):
     This class represents a 2D electric field, storing both amplitude and phase information
     for each pixel in a rectangular grid.
     """
+
     def __init__(self,
                  dimx: int,
                  dimy: int,
@@ -124,6 +125,14 @@ class ElectricField(BaseDataObj):
             f"Error: input array shape {v[1].shape} does not match phase shape {self.field[1].shape}"
 
         self.field[:] = self.to_xp(v)
+
+    @classmethod
+    def track_consumers_in_replay(cls):
+        # Objects adding a phase-additive contribution to an electric field (e.g. an
+        # ElectricFieldCombinator or PhaseScreenCube feeding a WFS downstream of a
+        # captured AtmoPropagation) must not be silently left out of a targeted replay
+        # (SPECULA #696, see Simul.build_targeted_replay)
+        return True
 
     def get_value(self):
         return self.field
@@ -330,13 +339,9 @@ class ElectricField(BaseDataObj):
         return hdr
 
     def save(self, filename, overwrite=True):
-        hdr = self.get_fits_header()
-        hdu = fits.PrimaryHDU(header=hdr)  # main HDU, empty, only header
-        hdul = fits.HDUList([hdu])
-        hdul.append(fits.ImageHDU(data=cpuArray(self.field[0]), name='AMPLITUDE'))
-        hdul.append(fits.ImageHDU(data=cpuArray(self.field[1]), name='PHASE'))
-        hdul.writeto(filename, overwrite=overwrite)
-        hdul.close()  # Force close for Windows
+        storage.write_object(filename, self.get_fits_header(),
+                             {'amplitude': self.field[0], 'phase': self.field[1]},
+                             overwrite=overwrite)
 
     @staticmethod
     def from_header(hdr, target_device_idx=None):
@@ -357,14 +362,14 @@ class ElectricField(BaseDataObj):
 
     @staticmethod
     def restore(filename, target_device_idx=None):
-        hdr = fits.getheader(filename)
-        if 'OBJ_TYPE' not in hdr or hdr['OBJ_TYPE'] != 'ElectricField':
-            raise ValueError(f"Error: file {filename} does not contain an ElectricField object")
-        ef = ElectricField.from_header(hdr, target_device_idx=target_device_idx)
-        with fits.open(filename) as hdul:
-            ef.field[0, :] = ef.to_xp(hdul[1].data)   # pylint: disable=no-member # created dyamically by pyfits
-            ef.field[1, :] = ef.to_xp(hdul[2].data)   # pylint: disable=no-member # created dyamically by pyfits
-        return ef
+        with storage.read_object(filename) as f:
+            hdr = f.header
+            if 'OBJ_TYPE' not in hdr or hdr['OBJ_TYPE'] != 'ElectricField':
+                raise ValueError(f"Error: file {filename} does not contain an ElectricField object")
+            obj = ElectricField.from_header(hdr, target_device_idx=target_device_idx)
+            obj.field[0, :] = obj.to_xp(f.read('amplitude', 1))
+            obj.field[1, :] = obj.to_xp(f.read('phase', 2))
+        return obj
 
     def array_for_display(self):
         """

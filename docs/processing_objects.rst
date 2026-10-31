@@ -7,7 +7,7 @@ Guidelines for processing objects
 Class derivation
 ----------------
 
-All processing objects derive from the :py:class:`~specula.base_processing_obj.BaseProcessingObj` class.
+All processing objects derive from the :py:class:`~iteras.base_processing_obj.BaseProcessingObj` class.
 
 Life cycle
 ----------
@@ -77,7 +77,7 @@ If arrays are very small and are not intended to be loaded on a GPU, even if pre
 Inputs
 ******
 
-Each input is an entry on the *self.inputs* dictionary, and is an instance of the :py:class:`~specula.connections.InputValue` class, initialized with the expected input type. It is possible for an input to be a list of values of the same type, in this case use an instance of :py:class:`~specula.connections.InputList`::
+Each input is an entry on the *self.inputs* dictionary, and is an instance of the :py:class:`~iteras.connections.InputValue` class, initialized with the expected input type. It is possible for an input to be a list of values of the same type, in this case use an instance of :py:class:`~iteras.connections.InputList`::
 
         self.inputs['seeing'] = InputValue(type=BaseValue)
         self.inputs['in_slopes_list'] = InputList(type=Slopes)
@@ -114,7 +114,7 @@ Declaring inputs and outputs
 In addition to filling *self.inputs* and *self.outputs*, a processing object declares its interface
 with the two class methods ``input_names()`` and ``output_names()``. Each one returns a dictionary
 that maps a name to an ``InputDesc(type, description)`` or ``OutputDesc(type, description)``
-named tuple, both defined in :py:mod:`specula.base_processing_obj`::
+named tuple, both defined in :py:mod:`iteras.base_processing_obj`::
 
     from specula.base_processing_obj import BaseProcessingObj, InputDesc, OutputDesc
 
@@ -131,7 +131,7 @@ named tuple, both defined in :py:mod:`specula.base_processing_obj`::
         def output_names(cls):
             return {'out_modes': OutputDesc(BaseValue, 'Reconstructed modal vector')}
 
-The type is the data object class (for an :py:class:`~specula.connections.InputList`,
+The type is the data object class (for an :py:class:`~iteras.connections.InputList`,
 the type of the list elements). The description is a short human-readable text.
 
 A derived class extends the declarations of its base class by updating the dictionary
@@ -158,8 +158,8 @@ The check raises an exception if:
 * a declared output is not present in *self.outputs*;
 * a declared input is not present in *self.inputs*, unless its declaration is optional (see below);
 * the input type is not exactly the declared type (a subclass is rejected),
-  or the input is not an :py:class:`~specula.connections.InputValue`
-  or an :py:class:`~specula.connections.InputList`;
+  or the input is not an :py:class:`~iteras.connections.InputValue`
+  or an :py:class:`~iteras.connections.InputList`;
 * the output is not an instance of the declared type (a subclass is accepted).
 
 If a class does not define ``input_names()`` or ``output_names()``, the corresponding check is skipped.
@@ -171,7 +171,7 @@ Optional declarations
 An input declaration is optional if its description ends with ``(optional)``.
 This is a different concept from the *optional=True* flag of an input:
 
-* *optional=True* in :py:class:`~specula.connections.InputValue`: the input always exists,
+* *optional=True* in :py:class:`~iteras.connections.InputValue`: the input always exists,
   but it may be left unconnected in the configuration file. This is checked by *setup()*.
 * ``(optional)`` at the end of the description: the input may be absent from *self.inputs*,
   because it is created only for some constructor parameters.
@@ -204,8 +204,8 @@ Custom checks
 
 When the inputs or outputs are truly dynamic and cannot be described by a stable name pattern and type,
 a class can override ``check_input_names()`` or ``check_output_names()``, as done for example by
-:py:class:`~specula.processing_objects.data_store.DataStore`
-and :py:class:`~specula.processing_objects.data_source.DataSource`.
+:py:class:`~iteras.processing_objects.data_store.DataStore`
+and :py:class:`~iteras.processing_objects.data_source.DataSource`.
 
 
 Input/Output connections

@@ -65,7 +65,7 @@ To enable efficient field analysis, you need to configure your simulation's ``Da
     data_store:
       class: 'DataStore'
       store_dir: './output/'
-      data_format: 'fits'  # or 'pickle'
+      data_format: 'fits'  # or 'npz', 'npy', 'hdf5', 'pickle'
       inputs:
         input_list: 
           - 'comm-control.out_comm'                   # Save DM commands (essential!)
@@ -405,6 +405,13 @@ tap with no effect on the control loop), you can relax this check:
         on_missing_downstream_consumers='warn',  # log instead of raising
         # or 'ignore' to silently proceed
     )
+
+The results of ``FieldAnalyser`` are saved in the ``PSF``, ``MA`` and ``CUBE``
+directories next to the tracking number, in the format given by its ``data_format``
+argument: ``'fits'``, ``'npz'``, ``'npy'`` or ``'hdf5'``. By default, the format
+of the data objects is used (the ``ITERAS_DATA_FORMAT`` or ``SPECULA_DATA_FORMAT``
+environment variable, or FITS). The format of the tracking number's own files does
+not matter: they are read in whatever format they were saved.
 
 Step 4: Visualizing the Results
 -------------------------------

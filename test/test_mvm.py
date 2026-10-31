@@ -5,6 +5,7 @@ import unittest
 
 from specula.processing_objects.mvm import MVM
 from specula.data_objects.recmat import Recmat
+from iteras.data_objects.matrix import Matrix
 from specula.base_value import BaseValue
 
 from test.specula_testlib import cpu_and_gpu
@@ -96,7 +97,7 @@ class TestMVM(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             MVM(recmat=None, target_device_idx=target_device_idx)
 
-        self.assertIn("recmat must be provided!", str(cm.exception))
+        self.assertIn("matrix must be provided!", str(cm.exception))
 
     @cpu_and_gpu
     def test_mvm_square_matrix(self, target_device_idx, xp):
@@ -260,3 +261,51 @@ class TestMVM(unittest.TestCase):
                 # Output should have n_rows elements
                 self.assertEqual(len(mvm.output.value), n_rows)
                 self.assertEqual(mvm.output.value.shape, (n_rows,))
+
+    @cpu_and_gpu
+    def test_matrix_parameter(self, target_device_idx, xp):
+        """matrix is the parameter name, recmat its previous name: only one can be given"""
+        matrix = Matrix(xp.eye(3, dtype=xp.float32), target_device_idx=target_device_idx)
+        self.assertIs(MVM(matrix=matrix, target_device_idx=target_device_idx).matrix, matrix)
+        self.assertIs(MVM(recmat=matrix, target_device_idx=target_device_idx).matrix, matrix)
+        with self.assertRaisesRegex(ValueError, 'Only one'):
+            MVM(matrix=matrix, recmat=matrix, target_device_idx=target_device_idx)
+
+
+class TestMVMParameterFiles(unittest.TestCase):
+
+    def test_matrix_object_and_recmat_object(self):
+        """
+        The matrix is restored from the calibration files with matrix_object,
+        or recmat_object as before, from the rec/ subdirectory in SPECULA
+        """
+        import os
+        import tempfile
+        import numpy as np
+        import yaml
+        from iteras.simul import Simul
+        from iteras.lib import storage
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, 'rec'))
+            Recmat(np.array([[1, 0], [0, 2], [1, 1]], dtype=np.float32),
+                   target_device_idx=-1).save(os.path.join(tmp, 'rec', 'm1.fits'))
+            for parname in ('matrix_object', 'recmat_object'):
+                with self.subTest(parname=parname):
+                    store_dir = os.path.join(tmp, f'store_{parname}')
+                    params = {
+                        'main': {'class': 'SimParams', 'root_dir': tmp,
+                                 'total_time': 0.002, 'time_step': 0.001},
+                        'gen': {'class': 'WaveGenerator', 'constant': [1.0, 2.0],
+                                'target_device_idx': -1},
+                        'mvm': {'class': 'MVM', parname: 'm1', 'target_device_idx': -1,
+                                'inputs': {'in_vector': 'gen.output'}},
+                        'store': {'class': 'DataStore', 'store_dir': store_dir, 'create_tn': False,
+                                  'data_format': 'npz',
+                                  'inputs': {'input_list': ['out-mvm.out_vector']}},
+                    }
+                    yml = os.path.join(tmp, f'{parname}.yml')
+                    with open(yml, 'w') as f:
+                        yaml.dump(params, f)
+                    Simul(yml, speed_report=False).run()
+                    with storage.read_object(os.path.join(store_dir, 'out.npz')) as f:
+                        np.testing.assert_allclose(f.read('data', 0)[-1], [1, 4, 3])

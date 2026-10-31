@@ -172,18 +172,25 @@ store:
         data_dir = os.path.dirname(self.orig_dir)
         tracking_number = os.path.basename(self.orig_dir)
 
-        replay = EfReplay(
-            data_dir=data_dir,
-            tracking_number=tracking_number,
-            output_refs=['dm.out_layer'],
-            start_time=0.0,
-            log_level=logging.INFO,
-        )
-        results = replay.compute_replay(force_recompute=True)
-
-        replayed = results['dm.out_layer']['data']
         original = fits.getdata(os.path.join(self.orig_dir, 'origlayer.fits'))
 
-        np.testing.assert_array_equal(replayed, original)
+        # The results can be saved in any data object format
+        for data_format, extension in [('fits', '.fits'), ('npz', '.npz'), ('npy', '.npy'), ('hdf5', '.h5')]:
+            with self.subTest(data_format=data_format):
+                replay = EfReplay(
+                    data_dir=data_dir,
+                    tracking_number=tracking_number,
+                    output_refs=['dm.out_layer'],
+                    start_time=0.0,
+                    log_level=logging.INFO,
+                    data_format=data_format,
+                )
+                try:
+                    results = replay.compute_replay(force_recompute=True)
+                    self.assertTrue(os.path.exists(
+                        os.path.join(replay.replay_output_dir, 'dm_out_layer' + extension)))
 
-        shutil.rmtree(replay.replay_output_dir, ignore_errors=True)
+                    replayed = results['dm.out_layer']['data']
+                    np.testing.assert_array_equal(replayed, original)
+                finally:
+                    shutil.rmtree(replay.replay_output_dir, ignore_errors=True)

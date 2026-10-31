@@ -1,4 +1,3 @@
-from specula import cpuArray
 from specula.base_data_obj import BaseDataObj
 from specula.data_objects.ifunc_inv import IFuncInv, cut_modes
 from astropy.io import fits
@@ -6,7 +5,7 @@ from astropy.io import fits
 from specula.lib.compute_zonal_ifunc import compute_zonal_ifunc
 from specula.lib.compute_zern_ifunc import compute_zern_ifunc
 from specula.lib.fast_pinv import fast_pinv
-from specula.lib.fits_io import load_fits_array
+from iteras.lib import storage
 
 
 def compute_kl_ifunc(*args, **kwargs):
@@ -184,17 +183,16 @@ class IFunc(BaseDataObj):
         return hdr
 
     def save(self, filename, overwrite=False):
-        hdr = self.get_fits_header()
-        hdu = fits.PrimaryHDU(header=hdr)
-        hdul = fits.HDUList([hdu])
-        hdul.append(fits.ImageHDU(data=cpuArray(self._influence_function.T), name='INFLUENCE_FUNCTION'))
-        hdul.append(fits.ImageHDU(data=cpuArray(self._mask_inf_func), name='MASK_INF_FUNC'))
-        hdul.writeto(filename, overwrite=overwrite)
-        hdul.close()  # Force close for Windows
+        storage.write_object(filename, self.get_fits_header(),
+                             {'influence_function': self._influence_function.T, 'mask_inf_func': self._mask_inf_func},
+                             overwrite=overwrite)
 
     @staticmethod
     def restore(filename, target_device_idx=None, exten=1):
-        with fits.open(filename) as hdul:
-            mask = hdul[exten+1].data
-        ifunc = load_fits_array(filename, ext=exten, target_device_idx=target_device_idx).T
+        # In FITS files, *exten* is the index of the HDU of the influence function,
+        # followed by the mask: the arrays are looked up by name only with the default value
+        with storage.read_object(filename) as f:
+            mask = f.read('mask_inf_func' if exten == 1 else None, exten + 1)
+            ifunc = f.load('influence_function' if exten == 1 else None, exten,
+                           target_device_idx=target_device_idx).T
         return IFunc(ifunc, mask=mask, target_device_idx=target_device_idx)

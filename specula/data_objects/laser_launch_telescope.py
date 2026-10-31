@@ -4,6 +4,7 @@ from astropy.io import fits
 
 from specula.base_data_obj import BaseDataObj
 from specula.data_objects.simul_params import SimulParams
+from iteras.lib import storage
 
 class LaserLaunchTelescope(BaseDataObj):
     """
@@ -85,11 +86,9 @@ class LaserLaunchTelescope(BaseDataObj):
         return hdr
 
     def save(self, filename, overwrite=False):
-        if not filename.endswith('.fits'):
-            filename += '.fits'
-        hdr = self.get_fits_header()
-        # Save fits file
-        fits.writeto(filename, np.zeros(2), hdr, overwrite=overwrite)
+        filename = storage.object_filename(filename)
+        storage.write_object(filename, self.get_fits_header(), {}, layout='placeholder',
+                             overwrite=overwrite)
 
     @staticmethod
     def from_header(hdr, target_device_idx=None):
@@ -108,5 +107,6 @@ class LaserLaunchTelescope(BaseDataObj):
 
     @staticmethod
     def restore(filename, target_device_idx=None):
-        hdr = fits.getheader(filename)
+        with storage.read_object(filename) as f:
+            hdr = f.header
         return LaserLaunchTelescope.from_header(hdr, target_device_idx=target_device_idx)

@@ -1,10 +1,9 @@
 import math
 
-import numpy as np
 from astropy.io import fits
 
-from specula import cpuArray
 from specula.base_data_obj import BaseDataObj
+from iteras.lib import storage
 
 
 class SubapData(BaseDataObj):
@@ -80,24 +79,23 @@ class SubapData(BaseDataObj):
         hdr['NP_SUB'] = self.np_sub
         hdr['NX'] = self.nx
         hdr['NY'] = self.ny
-        fits.writeto(filename, np.zeros(2), hdr, overwrite=overwrite)
-        fits.append(filename, cpuArray(self.idxs.T))  # Transposed for IDL-saved data compatibility
-        fits.append(filename, cpuArray(self.display_map))
+        storage.write_object(filename, hdr,
+                             {'idxs': self.idxs.T,  # Transposed for IDL-saved data compatibility
+                              'display_map': self.display_map},
+                             layout='placeholder', overwrite=overwrite)
 
     @staticmethod
     def restore(filename, target_device_idx=None):
         """Restores the :class:`~specula.data_objects.subap_data.SubapData` from a file."""
-
-        # pylint: disable=no-member
-        with fits.open(filename) as hdul:
-            hdr = hdul[0].header
+        with storage.read_object(filename) as f:
+            hdr = f.header
             version = hdr.get('VERSION')
             if version != 1:
                 raise ValueError(f"Unknown version {version} in file {filename}")
             energy_th = hdr.get('ENRGYTH')
             nx = hdr.get('NX')
             ny = hdr.get('NY')
-            idxs = hdul[1].data.T.copy()     # Transposed for IDL-saved compatibility
-            display_map = hdul[2].data.copy()
+            idxs = f.read('idxs', 1).T.copy()     # Transposed for IDL-saved compatibility
+            display_map = f.read('display_map', 2)
         return SubapData(idxs=idxs, display_map=display_map, nx=nx, ny=ny, energy_th=energy_th,
                          target_device_idx=target_device_idx)

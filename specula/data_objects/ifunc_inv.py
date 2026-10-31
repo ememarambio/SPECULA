@@ -1,7 +1,6 @@
-from specula import cpuArray
 from specula.base_data_obj import BaseDataObj
-from specula.lib.fits_io import load_fits_array
 from astropy.io import fits
+from iteras.lib import storage
 
 
 def cut_modes(matrix, start_mode=None, nmodes=None, idx_modes=None, modes_on_first_axis=True):
@@ -88,19 +87,18 @@ class IFuncInv(BaseDataObj):
         return hdr
 
     def save(self, filename, overwrite=False):
-        hdr = self.get_fits_header()
-        hdu = fits.PrimaryHDU(header=hdr)
-        hdul = fits.HDUList([hdu])
-        hdul.append(fits.ImageHDU(data=cpuArray(self.ifunc_inv.T), name='INFLUENCE_FUNCTION_INV'))
-        hdul.append(fits.ImageHDU(data=cpuArray(self.mask_inf_func), name='MASK_INF_FUNC'))
-        hdul.writeto(filename, overwrite=overwrite)
-        hdul.close()  # Force close for Windows
+        storage.write_object(filename, self.get_fits_header(),
+                             {'influence_function_inv': self.ifunc_inv.T, 'mask_inf_func': self.mask_inf_func},
+                             overwrite=overwrite)
 
     @staticmethod
     def restore(filename, target_device_idx=None, exten=1):
-        with fits.open(filename) as hdul:
-            mask = hdul[exten+1].data
-        ifunc_inv = load_fits_array(filename, ext=exten, target_device_idx=target_device_idx).T
+        # In FITS files, *exten* is the index of the HDU of the influence function inv,
+        # followed by the mask: the arrays are looked up by name only with the default value
+        with storage.read_object(filename) as f:
+            mask = f.read('mask_inf_func' if exten == 1 else None, exten + 1)
+            ifunc_inv = f.load('influence_function_inv' if exten == 1 else None, exten,
+                           target_device_idx=target_device_idx).T
         return IFuncInv(ifunc_inv, mask, target_device_idx=target_device_idx)
 
     def get_value(self):

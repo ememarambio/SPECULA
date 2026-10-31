@@ -470,7 +470,7 @@ class TestIirFilterData(unittest.TestCase):
 
         # Test poles extraction
         extracted_poles = cpuArray(original_filter.get_poles())
-        expected_poles = np.array([[1/ff[0]], [1/ff[1]]])
+        expected_poles = np.array([[ff[0]], [ff[1]]])
         np.testing.assert_allclose(extracted_poles, expected_poles, rtol=1e-7, atol=1e-7,
                                  err_msg="Poles extraction failed")
 
@@ -530,7 +530,7 @@ class TestIirFilterData(unittest.TestCase):
         gains = [0.1]
         ff = [0.5]  # Well inside unit circle
         filter_data = IirFilterData.from_gain_and_ff(gains, ff, target_device_idx=target_device_idx)
-        gm, pm, wg, wp = filter_data.stability_margins(0, dt=1.0)  # Add dt parameter
+        gm, pm, wg, wp = filter_data.stability_margins(0, dt=1.0, unity_plant=True)
 
         # For a stable system, margins should be finite and positive
         self.assertTrue(gm > 0 or np.isinf(gm))  # Gain margin can be infinite
@@ -893,3 +893,263 @@ class TestIirFilterData(unittest.TestCase):
         plt.tight_layout()
 
         plt.show()
+
+
+class TestIirFilterDataZerosPoles(unittest.TestCase):
+
+    def test_zeros_and_poles_of_known_filter(self):
+        """H(z) = (z - 0.5) / (z - 0.8): coefficients lowest order first"""
+        data = IirFilterData(ordnum=[2], ordden=[2], num=[[-0.5, 1.0]], den=[[-0.8, 1.0]],
+                             target_device_idx=-1)
+        np.testing.assert_allclose(cpuArray(data.get_zeros()), [[0.5]], atol=1e-12)
+        np.testing.assert_allclose(cpuArray(data.get_poles()), [[0.8]], atol=1e-12)
+
+    def test_set_zeros_and_poles(self):
+        """set_zeros()/set_poles() give the coefficients of (z - 0.3) / (z - 0.9)"""
+        data = IirFilterData(ordnum=[2], ordden=[2], num=[[0.0, 1.0]], den=[[-1.0, 1.0]],
+                             target_device_idx=-1)
+        data.set_zeros(np.array([[0.3]]))
+        data.set_poles(np.array([[0.9]]))
+        np.testing.assert_allclose(cpuArray(data.num), [[-0.3, 1.0]], atol=1e-12)
+        np.testing.assert_allclose(cpuArray(data.den), [[-0.9, 1.0]], atol=1e-12)
+
+    def test_complex_poles_of_second_order_filter(self):
+        """Poles 0.9 exp(+-i pi/4): den = z^2 - 2 r cos(theta) z + r^2"""
+        r, theta = 0.9, np.pi / 4
+        data = IirFilterData(ordnum=[3], ordden=[3], num=[[0.0, 0.0, 1.0]],
+                             den=[[r ** 2, -2 * r * np.cos(theta), 1.0]], target_device_idx=-1)
+        poles = cpuArray(data.get_poles())[0]
+        self.assertTrue(np.iscomplexobj(poles))
+        np.testing.assert_allclose(sorted(poles, key=lambda p: p.imag),
+                                   [r * np.exp(-1j * theta), r * np.exp(1j * theta)], atol=1e-12)
+
+    def test_set_complex_poles(self):
+        """set_poles() with a conjugate pair gives the real coefficients, and the poles back"""
+        r, theta = 0.9, np.pi / 4
+        pair = np.array([[r * np.exp(1j * theta), r * np.exp(-1j * theta)]])
+        data = IirFilterData(ordnum=[3], ordden=[3], num=[[0.0, 0.0, 1.0]],
+                             den=[[0.0, -1.0, 1.0]], target_device_idx=-1)
+        data.set_poles(pair)
+        np.testing.assert_allclose(cpuArray(data.den), [[r ** 2, -2 * r * np.cos(theta), 1.0]],
+                                   atol=1e-12)
+        self.assertFalse(np.iscomplexobj(cpuArray(data.den)))
+        data.poles = None   # recompute them from the coefficients
+        np.testing.assert_allclose(sorted(cpuArray(data.get_poles())[0], key=lambda p: p.imag),
+                                   sorted(pair[0], key=lambda p: p.imag), atol=1e-12)
+
+    def test_set_poles_rejects_unpaired_complex_roots(self):
+        data = IirFilterData(ordnum=[3], ordden=[3], num=[[0.0, 0.0, 1.0]],
+                             den=[[0.0, -1.0, 1.0]], target_device_idx=-1)
+        with self.assertRaises(ValueError):
+            data.set_poles(np.array([[0.5 + 0.5j, 0.2]]))
+
+
+class TestIirFilterDataWidths(unittest.TestCase):
+
+    def test_num_shorter_than_den_is_padded(self):
+        """num = [0.5], den = [-1, 1]: IirFilter runs y[n] = y[n-1] + 0.5 x[n], i.e.
+        H(z) = 0.5 z / (z - 1). num is padded to [0, 0.5], so that the analysis
+        methods give the same transfer function as the simulation."""
+        data = IirFilterData(ordnum=[1], ordden=[2], num=[[0.5]], den=[[-1.0, 1.0]],
+                             target_device_idx=-1)
+        np.testing.assert_array_equal(cpuArray(data.num), [[0.0, 0.5]])
+        np.testing.assert_array_equal(cpuArray(data.gain), [0.5])
+        fs, f = 1000.0, 300.0
+        z = np.exp(2j * np.pi * f / fs)
+        h = data.frequency_response(data.num[0], data.den[0], fs, freq=np.array([f]))[0]
+        np.testing.assert_allclose(h, 0.5 * z / (z - 1), rtol=1e-12)
+
+    def test_padding_does_not_change_the_simulation(self):
+        """Impulse response of IirFilter with num = [0.5] and with num = [0, 0.5]"""
+        from specula.base_value import BaseValue
+        from specula.processing_objects.iir_filter import IirFilter
+
+        def impulse_response(num):
+            data = IirFilterData(ordnum=[len(num[0])], ordden=[2], num=num, den=[[-1.0, 1.0]],
+                                 target_device_idx=-1)
+            flt = IirFilter(data, target_device_idx=-1)
+            inp = BaseValue(value=np.zeros(1), target_device_idx=-1)
+            flt.inputs['delta_comm'].set(inp)
+            flt.setup()
+            out = []
+            for t in range(1, 6):
+                inp.value[:] = 1.0 if t == 1 else 0.0
+                inp.generation_time = t
+                flt.check_ready(t)
+                flt.trigger()
+                flt.post_trigger()
+                out.append(float(cpuArray(flt.outputs['out_comm'].value)[0]))
+            return out
+
+        np.testing.assert_allclose(impulse_response([[0.5]]), [0.5] * 5)
+        np.testing.assert_allclose(impulse_response([[0.0, 0.5]]), [0.5] * 5)
+
+    def test_den_shorter_than_num_is_padded(self):
+        data = IirFilterData(ordnum=[3], ordden=[2], num=[[0.1, 0.2, 0.3]], den=[[-0.5, 1.0]],
+                             target_device_idx=-1)
+        np.testing.assert_array_equal(cpuArray(data.den), [[0.0, -0.5, 1.0]])
+
+
+class TestIirFilterDataLowPass(unittest.TestCase):
+
+    def test_butterworth_cutoff(self):
+        """Butterworth low-pass filters (bilinear transform with prewarping): unit DC gain,
+        |H| = 1/sqrt(2) exactly at fc, zero at the Nyquist frequency, for orders 1, 2, 4"""
+        fs, fc = 1000.0, 50.0
+        for n_ord in (1, 2, 4):
+            with self.subTest(n_ord=n_ord):
+                data = IirFilterData.lpf_from_fc(fc, fs, n_ord=n_ord, target_device_idx=-1)
+                h = np.abs(data.frequency_response(data.num[0], data.den[0], fs,
+                                                   freq=np.array([1e-6, fc, fs / 2])))
+                np.testing.assert_allclose(h, [1.0, 1 / np.sqrt(2), 0.0], atol=1e-9)
+
+
+class TestIirFilterDataControlTimebase(unittest.TestCase):
+
+    def test_default_is_discrete_time(self):
+        """The coefficients are in z: without dt, to_control_tf() gives a discrete-time
+        transfer function, equal to 0.5 z / (z - 1) for the integrator"""
+        data = IirFilterData.from_gain_and_ff([0.5], target_device_idx=-1)
+        if not data.has_control_support:
+            self.skipTest('control library not installed')
+        import control
+        tf = data.to_control_tf()
+        self.assertTrue(control.isdtime(tf, strict=True))
+        z = np.exp(0.3j)
+        np.testing.assert_allclose(complex(tf(z)), 0.5 * z / (z - 1), rtol=1e-12)
+
+
+class TestIirFilterDataExplicitPlant(unittest.TestCase):
+
+    def setUp(self):
+        self.data = IirFilterData.from_gain_and_ff([0.5], target_device_idx=-1)
+
+    def test_plant_must_be_chosen(self):
+        """Without a plant, or with more than one, the analysis methods raise ValueError"""
+        calls = [lambda **p: self.data.RTF(0, 1000.0, plot=False, **p),
+                 lambda **p: self.data.NTF(0, 1000.0, plot=False, **p),
+                 lambda **p: self.data.is_stable(0, **p),
+                 lambda **p: self.data.max_stable_gain(mode=0, n_gain=10, **p),
+                 lambda **p: self.data.resonance_frequency(0, **p),
+                 lambda **p: self.data.stability_analysis(mode=0, n_gain=10, **p)]
+        for call in calls:
+            with self.assertRaisesRegex(ValueError, 'explicitly'):
+                call()
+            with self.assertRaisesRegex(ValueError, 'explicitly'):
+                call(delay=1, unity_plant=True)
+            with self.assertRaisesRegex(ValueError, 'together'):
+                call(dm=[1.0], nw=[1.0])
+
+    def test_unity_plant_equals_explicit_unity_coefficients(self):
+        """unity_plant=True is the same as P = 1 / (1 * 1)"""
+        freq = np.array([10.0, 100.0, 300.0])
+        a = self.data.RTF(0, 1000.0, freq=freq, plot=False, unity_plant=True)
+        b = self.data.RTF(0, 1000.0, freq=freq, plot=False, dm=[1.0], nw=[1.0], dw=[1.0])
+        np.testing.assert_allclose(a, b, rtol=1e-12)
+
+    def test_rtf_of_integrator_with_one_frame_delay(self):
+        """C = 0.5 z / (z - 1), P = 1/z: RTF = 1 / (1 + 0.5 / (z - 1)) = (z - 1) / (z - 0.5)"""
+        fs, f = 1000.0, np.array([50.0, 200.0])
+        z = np.exp(2j * np.pi * f / fs)
+        rtf = self.data.RTF(0, fs, freq=f, plot=False, delay=1)
+        np.testing.assert_allclose(rtf, np.abs((z - 1) / (z - 0.5)), rtol=1e-12)
+
+    def test_stability_margins_of_the_loop(self):
+        """Integrator 0.5 z / (z - 1) with P = 1/z^2: the loop L = 0.5 / (z (z - 1)) is at the
+        stability limit for a gain of 1 (z^2 - z + g = 0 has |z| = 1 for g = 1), so the gain
+        margin is 1 / 0.5 = 2 (6.02 dB)"""
+        if not self.data.has_control_support:
+            self.skipTest('control library not installed')
+        gm_db, pm, wg, wp = self.data.stability_margins(0, delay=2)
+        np.testing.assert_allclose(gm_db, 20 * np.log10(2.0), atol=1e-6)
+
+
+class TestIirFilterDataUnusedRoots(unittest.TestCase):
+
+    def test_unused_entries_are_nan(self):
+        """Second-order Butterworth filter in arrays of width 5 (n_coeff = 2 n_ord + 1): two
+        poles (a complex pair inside the unit circle) and two zeros at z = -1, then NaN"""
+        data = IirFilterData.lpf_from_fc(50.0, 1000.0, n_ord=2, target_device_idx=-1)
+        poles = cpuArray(data.get_poles())[0]
+        zeros = cpuArray(data.get_zeros())[0]
+        self.assertEqual(poles.shape, (4,))
+        self.assertTrue(np.all(np.isfinite(poles[:2])) and np.all(np.isnan(poles[2:])))
+        self.assertTrue(np.all(np.abs(poles[:2]) < 1))
+        np.testing.assert_allclose(zeros[:2], [-1.0, -1.0], atol=1e-6)
+        self.assertTrue(np.all(np.isnan(zeros[2:])))
+
+    def test_true_zero_at_origin_is_kept(self):
+        """The integrator 0.5 z / (z - 1) has a true zero at z = 0, which is not NaN"""
+        data = IirFilterData.from_gain_and_ff([0.5], target_device_idx=-1)
+        np.testing.assert_allclose(cpuArray(data.get_zeros()), [[0.0]], atol=1e-12)
+        np.testing.assert_allclose(cpuArray(data.get_poles()), [[1.0]], atol=1e-12)
+
+
+class TestIirFilterDataExactStability(unittest.TestCase):
+
+    def test_max_stable_gain_of_integrator_with_delay(self):
+        """Integrator g z / (z - 1), plant z^-d: z^d - z^(d-1) + g = 0 is at the stability limit for
+        g = 2 (d = 1), g = 1 (d = 2), g = (sqrt(5) - 1) / 2 (d = 3). The result does not depend on the
+        current gain of the filter (normalized filter)"""
+        expected = {1: 2.0, 2: 1.0, 3: (np.sqrt(5) - 1) / 2}
+        for gain in (1.0, 0.3):
+            data = IirFilterData.from_gain_and_ff([gain], target_device_idx=-1)
+            for d, g_max in expected.items():
+                with self.subTest(gain=gain, delay=d):
+                    np.testing.assert_allclose(data.max_stable_gain(mode=0, delay=d), g_max,
+                                               rtol=1e-9)
+
+    def test_max_stable_gain_is_the_stability_limit(self):
+        """Fractional delay and a low-pass filter in the plant: the loop is stable just below the
+        result and unstable just above it (checked with is_stable)"""
+        data = IirFilterData.from_gain_and_ff([1.0], [0.99], target_device_idx=-1)
+        lpf = IirFilterData.lpf_from_fc(200.0, 1000.0, n_ord=2, target_device_idx=-1)
+        nw, dw = data.discrete_delay_tf(2.4)
+        plant = dict(nw=np.convolve(nw, cpuArray(lpf.num[0])), dm=cpuArray(lpf.den[0]), dw=dw)
+        g_max = data.max_stable_gain(mode=0, **plant)
+        self.assertTrue(0 < g_max < 20)
+        for factor, stable in ((1 - 1e-6, True), (1 + 1e-6, False)):
+            probe = IirFilterData.from_gain_and_ff([g_max * factor], [0.99], target_device_idx=-1)
+            self.assertEqual(probe.is_stable(0, **plant), stable)
+
+    def test_always_stable_loop_returns_max_gain(self):
+        """Integrator with P = 1: z (1 + g) - 1 = 0 has its root 1 / (1 + g) inside the unit
+        circle for all positive gains"""
+        data = IirFilterData.from_gain_and_ff([1.0], target_device_idx=-1)
+        self.assertEqual(data.max_stable_gain(mode=0, unity_plant=True), 20.0)
+        self.assertEqual(data.max_stable_gain(mode=0, unity_plant=True, max_gain=5.0), 5.0)
+
+    def test_zero_gain_filter_cannot_be_normalized(self):
+        data = IirFilterData(ordnum=[2], ordden=[2], num=[[0.5, 0.0]], den=[[-1.0, 1.0]],
+                             target_device_idx=-1)
+        with self.assertRaisesRegex(ValueError, 'normalized'):
+            data.max_stable_gain(mode=0, delay=1)
+
+    def test_resonance_is_the_rtf_peak(self):
+        """Integrator 0.5 z / (z - 1), plant z^-2: L = 0.5 / (z (z - 1)). The resonance is the
+        maximum of |1 / (1 + L)|, here computed directly on the same grid"""
+        data = IirFilterData.from_gain_and_ff([0.5], target_device_idx=-1)
+        fs = 1000.0
+        freq = np.linspace(0, fs / 2, 10001)[1:]
+        z = np.exp(2j * np.pi * freq / fs)
+        rtf = np.abs(1 / (1 + 0.5 / (z * (z - 1))))
+        f_res, peak = data.resonance_frequency(0, delay=2, fs=fs)
+        self.assertAlmostEqual(f_res, freq[np.argmax(rtf)])
+        np.testing.assert_allclose(peak, rtf.max(), rtol=1e-10)
+        ntf = np.abs(0.5 / (z * (z - 1)) / (1 + 0.5 / (z * (z - 1))))
+        f_ntf, peak_ntf = data.resonance_frequency(0, delay=2, fs=fs, transfer_function='ntf')
+        self.assertAlmostEqual(f_ntf, freq[np.argmax(ntf)])
+        np.testing.assert_allclose(peak_ntf, ntf.max(), rtol=1e-10)
+
+    def test_stability_analysis_resonance_near_the_limit(self):
+        """Integrator with gain 0.5 and plant z^-2: g_max = 1, and at 0.99 g_max the closed-loop
+        poles z^2 - z + 0.99 = 0 are close to the unit circle at the angle
+        arccos(1 / (2 sqrt(0.99))): the RTF peaks at that frequency. The current gain (0.5) must
+        not be applied twice."""
+        data = IirFilterData.from_gain_and_ff([0.5], target_device_idx=-1)
+        fs = 1000.0
+        result = data.stability_analysis(mode=0, delay=2, fs=fs)
+        np.testing.assert_allclose(result['max_stable_gain'], 1.0, rtol=1e-9)
+        f_pole = np.arccos(1 / (2 * np.sqrt(0.99))) / (2 * np.pi) * fs
+        self.assertAlmostEqual(result['resonance_frequency'], f_pole, delta=1.0)
+        self.assertGreater(result['resonance_amplitude'], 10)

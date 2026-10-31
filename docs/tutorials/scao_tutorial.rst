@@ -553,7 +553,7 @@ Create ``config/scao_tutorial.yml``:
 
 The configuration is now ready to run the calibration step!
 
-Note that the :class:`specula.processing_objects.data_store.DataStore` object can be configured to save more data, such as the slopes, the detector pixels, the PSF, etc.
+Note that the :class:`iteras.processing_objects.data_store.DataStore` object can be configured to save more data, such as the slopes, the detector pixels, the PSF, etc.
 
 Part 2: Running the Simulation
 ------------------------------

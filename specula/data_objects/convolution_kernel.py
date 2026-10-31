@@ -9,7 +9,7 @@ from astropy.io import fits
 from specula import cpuArray, ASEC2RAD
 from specula.base_data_obj import BaseDataObj
 from specula.lib.rebin import rebin2d
-from specula.lib.fits_io import load_fits_array
+from iteras.lib import storage
 
 
 def lgs_map_sh(nsh, diam, rl, zb, dz, profz, fwhmb, ps, ssp,
@@ -351,20 +351,7 @@ class ConvolutionKernel(BaseDataObj):
                 "Cannot save to file. Use restore() to reload from existing file, "
                 "or recalculate with calculate_lgs_map()."
             )
-
-        hdr = self.get_fits_header()
-
-        # Create a primary HDU with just the header
-        primary_hdu = fits.PrimaryHDU(header=hdr)
-
-        # Create an HDU with the kernel data
-        kernel_data = cpuArray(self.real_kernels)
-        kernel_hdu = fits.ImageHDU(data=kernel_data)
-
-        # Create an HDUList and write to file
-        hdul = fits.HDUList([primary_hdu, kernel_hdu])
-        hdul.writeto(filename, overwrite=True)
-        hdul.close()  # Force close for Windows
+        storage.write_object(filename, self.get_fits_header(), {'real_kernels': self.real_kernels})
 
     def prepare_for_sh(self, sodium_altitude=None, sodium_intensity=None, current_time=None):
         # Update the kernel parameters if provided
@@ -428,29 +415,27 @@ class ConvolutionKernel(BaseDataObj):
         Returns:
             ConvolutionKernel: The restored ConvolutionKernel object
         """
-        hdr = fits.getheader(filename, ext=0)  # Get header from primary HDU
-
-        version = hdr['VERSION']
-        if version != 1.1:
-            raise ValueError(f'Unknown version {version}. Only version=1.1 is supported')
-
-        if kernel_obj is None:
-            kernel_obj = ConvolutionKernel.from_header(hdr, target_device_idx=target_device_idx)
-        else:
-            # If a kernel object is provided, use it
-            # check if the dimensions match
-            if kernel_obj.dimx != hdr['DIMX'] or kernel_obj.dimy != hdr['DIMY']:
-                raise ValueError("Provided kernel object dimensions do not match the FITS file dimensions")
-            # Read properties from header
-            kernel_obj.pxscale = hdr['PXSCALE']
-            kernel_obj.dimension = hdr['DIM']
-            kernel_obj.oversampling = hdr['OVERSAMP']
-            kernel_obj.positive_shift_tt = hdr['POSTT']
-            kernel_obj.spot_size = hdr['SPOTSIZE']
-
-        kernel_obj.real_kernels = load_fits_array(filename, ext=1,
-                                                  target_device_idx=kernel_obj.target_device_idx,
-                                                  precision=kernel_obj.precision)
+        with storage.read_object(filename) as f:
+            hdr = f.header
+            version = hdr['VERSION']
+            if version != 1.1:
+                raise ValueError(f'Unknown version {version}. Only version=1.1 is supported')
+            if kernel_obj is None:
+                kernel_obj = ConvolutionKernel.from_header(hdr, target_device_idx=target_device_idx)
+            else:
+                # If a kernel object is provided, use it
+                # check if the dimensions match
+                if kernel_obj.dimx != hdr['DIMX'] or kernel_obj.dimy != hdr['DIMY']:
+                    raise ValueError("Provided kernel object dimensions do not match the FITS file dimensions")
+                # Read properties from header
+                kernel_obj.pxscale = hdr['PXSCALE']
+                kernel_obj.dimension = hdr['DIM']
+                kernel_obj.oversampling = hdr['OVERSAMP']
+                kernel_obj.positive_shift_tt = hdr['POSTT']
+                kernel_obj.spot_size = hdr['SPOTSIZE']
+            kernel_obj.real_kernels = f.load('real_kernels', 1,
+                                             target_device_idx=kernel_obj.target_device_idx,
+                                             precision=kernel_obj.precision)
         kernel_obj.process_kernels(return_fft=return_fft)
         return kernel_obj
 

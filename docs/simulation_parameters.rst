@@ -63,6 +63,11 @@ Time Parameters
 
 - **total_time**: Total simulation duration [s].
 - **time_step**: Simulation time step [s]. This is the fundamental time resolution of the simulation.
+
+  ``total_time`` and ``time_step`` must be set in the parameter file: they have
+  no default value, since delays, gains, filters and generators all depend on
+  them. The other main parameters (``root_dir``, ``add_modules``, ...) take
+  their default value when they are not given.
 - **dt** (in detectors): Detector integration time [s]. Can be a multiple of ``time_step`` to simulate slower detectors.
 - **start_time**: Time after which to start recording statistics (e.g., PSF integration) [s]. Default is 0.0.
 

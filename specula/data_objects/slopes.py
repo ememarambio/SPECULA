@@ -1,8 +1,8 @@
 from astropy.io import fits
 
-from specula import cpuArray
 from specula.base_data_obj import BaseDataObj
 from specula.base_value import BaseValue
+from iteras.lib import storage
 
 
 class Slopes(BaseDataObj):
@@ -242,12 +242,8 @@ class Slopes(BaseDataObj):
         The main HDU contains only the header, and the slopes data is stored
         in an image extension named 'SLOPES'.
         """
-        hdr = self.get_fits_header()
-        hdu = fits.PrimaryHDU(header=hdr)  # main HDU, empty, only header
-        hdul = fits.HDUList([hdu])
-        hdul.append(fits.ImageHDU(data=cpuArray(self.slopes), name='SLOPES'))
-        hdul.writeto(filename, overwrite=overwrite)
-        hdul.close()  # Force close for Windows
+        storage.write_object(filename, self.get_fits_header(), {'slopes': self.slopes},
+                             overwrite=overwrite)
         
     @staticmethod
     def from_header(hdr, target_device_idx=None):
@@ -267,9 +263,10 @@ class Slopes(BaseDataObj):
     
     @staticmethod
     def restore(filename, target_device_idx=None):
-        hdr = fits.getheader(filename)
+        with storage.read_object(filename) as f:
+            hdr = f.header
+            slopesdata = f.read('slopes', 1)
         slopes = Slopes.from_header(hdr, target_device_idx=target_device_idx)
-        slopesdata = fits.getdata(filename, ext=1)
         if hdr['VERSION'] >= 3:
             slopes.set_value(slopesdata)
         else:

@@ -9,7 +9,7 @@ The main way to run a simulation is to use the ``specula`` command line tool, in
 with the SPECULA package, giving the configuration file as an argument, in addition to several
 optional arguments (visible with the ``specula -h`` command).
 
-When embedding in another Python program, it is possible to use the :class:`specula.simul.Simul` class directly:
+When embedding in another Python program, it is possible to use the :class:`iteras.simul.Simul` class directly:
 
 .. code-block:: python
 
@@ -42,7 +42,7 @@ To find out where the simulation time is spent, see the :doc:`profiling` page.
 Listing simulation runs
 =======================
 
-Each run saved by a :class:`~specula.processing_objects.data_store.DataStore` gets its own TN folder
+Each run saved by a :class:`~iteras.processing_objects.data_store.DataStore` gets its own TN folder
 (e.g. ``20260805_080019``, or ``20260805_080019.0`` for a second run started in the same second),
 containing a ``params.yml`` with the full simulation parameters, overrides included.
 When many runs accumulate in the same folder, the ``specula_list_runs`` command line tool shows what
@@ -64,6 +64,44 @@ Main options (see ``specula_list_runs -h``):
 - ``--all-keys``: CSV columns also for parameters present only in some runs
 - ``--short``: shorten values longer than 50 characters (values longer than 1000 characters are always shortened)
 - ``--out FILE``: write the CSV elsewhere
+
+Data formats
+============
+
+Data objects (calibration files, the ``_object`` and ``tag`` parameters) and the
+inputs saved by ``DataStore`` are stored as a header and a set of named arrays,
+in one of the following formats, chosen by the extension of the file name:
+
+- ``fits`` (``.fits`` files): the default. The layout of the files of each
+  class is the same as in previous versions, and files written by previous
+  versions can still be read;
+- ``npz`` (``.npz`` files): numpy archives, readable with ``numpy.load()``
+  without pickle. Each array is an entry with its name, and the header is in
+  the ``__header__`` entry, as JSON;
+- ``npy`` (``.npy`` directories): one ``<array>.npy`` file per array and the
+  header in ``header.json``. Suited to large arrays, which can be read
+  without copies and are streamed to the GPU in chunks, like FITS files;
+- ``hdf5`` (``.h5`` files): one dataset per array, readable with h5py or any
+  HDF5 tool. The header keywords are also attributes of the file.
+
+The headers of the npz, npy and HDF5 files do not have the limits of FITS
+headers: keywords can be longer than 8 characters and values can contain any
+text. Their arrays can also be complex, which FITS files cannot store.
+
+``DataStore`` saves each of its inputs in a file named after the input, with
+the data at each stored time step (array ``data``), the times (array ``times``)
+and the header of the data object. It can also use the ``pickle`` format
+(``.pickle`` files). The format is chosen with the ``data_format`` parameter.
+When it is not given, the format is taken from the ``ITERAS_DATA_FORMAT``
+environment variable (or ``SPECULA_DATA_FORMAT``), and is ``fits`` if neither is
+set. ``DataSource``, and therefore the replays, detect the format of each file
+from its extension.
+
+Calibration files written without an extension, for example by the
+calibrators, get the extension of the default format, and are ``fits`` files
+if the default format is ``pickle``. When a calibration file is read by its
+tag, the file of the default format is used if it exists, otherwise the file
+in any of the other formats.
 
 Output logging
 ==============
@@ -336,7 +374,7 @@ The ``--nsimul`` parameter automatically runs multiple simulations in sequence, 
 Python API
 ~~~~~~~~~~
 
-Using the :class:`specula.simul.Simul` class directly with explicit ``simul_idx``:
+Using the :class:`iteras.simul.Simul` class directly with explicit ``simul_idx``:
 
 .. code-block:: python
 

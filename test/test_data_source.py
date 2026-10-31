@@ -75,22 +75,21 @@ class TestDataSource(unittest.TestCase):
             self.assertTrue(np.allclose(ds.storage["test"][1.0], np.array([10, 20])))
 
     def test_load_fits_success(self):
-        """Test DataSource.load_fits() correctly reads FITS files using astropy."""
-        mock_hdul = MagicMock()
-        mock_hdul.__enter__.return_value = mock_hdul
-        mock_hdul.__exit__.return_value = None
-        mock_hdul.__getitem__.side_effect = lambda idx: {
-            0: MagicMock(data=np.array([[1, 2], [3, 4]]), header={"OBJ_TYPE": "BaseValue"}),
-            1: MagicMock(data=np.array([0.1, 0.2]))
-        }[idx]
-
-        with patch("specula.processing_objects.data_source.fits.open", return_value=mock_hdul):
-            ds = DataSource(outputs=[], store_dir="/tmp", data_format="fits")
+        """Test DataSource.load_fits() reads FITS files in the layout of older versions
+        (data in the primary HDU, times in an unnamed extension)."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmpdir:
+            hdr = fits.Header()
+            hdr['OBJ_TYPE'] = 'BaseValue'
+            fits.HDUList([fits.PrimaryHDU(np.array([[1, 2], [3, 4]]), header=hdr),
+                          fits.ImageHDU(np.array([1, 2], dtype=np.uint64), header=hdr)]
+                         ).writeto(os.path.join(tmpdir, 'mydata.fits'))
+            ds = DataSource(outputs=[], store_dir=tmpdir, data_format="fits")
             ds.load_fits("mydata")
 
             self.assertIn("mydata", ds.storage)
             self.assertEqual(ds.obj_type["mydata"], "BaseValue")
-            self.assertTrue(np.allclose(ds.storage["mydata"][0.1], np.array([1, 2])))
+            self.assertTrue(np.allclose(ds.storage["mydata"][1], np.array([1, 2])))
 
     def test_loadFromFile_invalid_duplicate(self):
         """Test DataSource.loadFromFile() raises ValueError when reloading same key."""

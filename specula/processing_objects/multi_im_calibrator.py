@@ -9,6 +9,7 @@ from specula.data_objects.pupilstop import Pupilstop
 from specula.data_objects.intmat import Intmat
 from specula.base_value import BaseValue
 from specula.connections import InputList
+from iteras.lib import storage
 
 
 class MultiImCalibrator(BaseProcessingObj):
@@ -51,12 +52,12 @@ class MultiImCalibrator(BaseProcessingObj):
         # Path and existing file existence checks
         self.im_paths = []
         for i in range(self.n_inputs):
-            path = os.path.join(self.data_dir, f"{self.im_tag[i]}.fits")
+            path = storage.object_filename(os.path.join(self.data_dir, f"{self.im_tag[i]}"))
             self.im_paths.append(path)
             if os.path.exists(path) and not self.overwrite:
                 raise FileExistsError(f'IM file {path} already exists, please remove it')
 
-        self.full_im_path = os.path.join(self.data_dir, f"{self.full_im_tag}.fits")
+        self.full_im_path = storage.object_filename(os.path.join(self.data_dir, f"{self.full_im_tag}"))
         if os.path.exists(self.full_im_path) and not self.overwrite:
             raise FileExistsError(f'IM file {self.full_im_path} already exists, please remove it')
 

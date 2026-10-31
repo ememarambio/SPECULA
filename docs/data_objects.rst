@@ -1,19 +1,19 @@
 Data Objects
 ============
 
-Data objects in SPECULA serve as **intelligent containers** that connect processing objects and carry temporal information about when data was generated. They extend the :class:`~specula.base_data_obj.BaseDataObj` class and provide the essential data flow between computational components.
+Data objects in SPECULA serve as **intelligent containers** that connect processing objects and carry temporal information about when data was generated. They extend the :class:`~iteras.base_data_obj.BaseDataObj` class and provide the essential data flow between computational components.
 
 Core Concepts
 -------------
 
 **Temporal Awareness**
-   Every data object tracks its :attr:`~specula.base_data_obj.BaseDataObj.generation_time`, allowing the simulation to maintain temporal consistency and detect when data needs to be refreshed.
+   Every data object tracks its :attr:`~iteras.base_data_obj.BaseDataObj.generation_time`, allowing the simulation to maintain temporal consistency and detect when data needs to be refreshed.
 
 **Device Management**
-   Data objects automatically handle GPU/CPU transfers through the :meth:`~specula.base_data_obj.BaseDataObj.copyTo` and :meth:`~specula.base_data_obj.BaseDataObj.transferDataTo` methods, enabling seamless computation across different devices.
+   Data objects automatically handle GPU/CPU transfers through the :meth:`~iteras.base_data_obj.BaseDataObj.copyTo` and :meth:`~iteras.base_data_obj.BaseDataObj.transferDataTo` methods, enabling seamless computation across different devices.
 
 **Persistent Storage**
-   All data objects implement :meth:`~specula.base_data_obj.BaseDataObj.save` and :meth:`~specula.base_data_obj.BaseDataObj.read` methods using FITS format, ensuring simulation data can be stored and reloaded.
+   All data objects implement :meth:`~iteras.base_data_obj.BaseDataObj.save` and :meth:`~iteras.base_data_obj.BaseDataObj.read` methods using FITS format, ensuring simulation data can be stored and reloaded.
 
 **Connection Framework**
    Data objects flow through the simulation graph as outputs from one processing object become inputs to another, creating a directed acyclic graph of computation.
@@ -45,8 +45,9 @@ Available Data Objects
 **Signal Processing**
    * :class:`~specula.data_objects.convolution_kernel.ConvolutionKernel` - Generic convolution kernels
    * :class:`~specula.data_objects.gaussian_convolution_kernel.GaussianConvolutionKernel` - Gaussian PSF kernels
-   * :class:`~specula.data_objects.iir_filter_data.IirFilterData` - Digital filter coefficients
-   * :class:`~specula.data_objects.time_history.TimeHistory` - Temporal data sequences
+   * :class:`~iteras.data_objects.iir_filter_data.IirFilterData` - Digital filter coefficients
+   * :class:`~iteras.data_objects.time_history.TimeHistory` - Temporal data sequences
+   * :class:`~iteras.data_objects.matrix.Matrix` - Generic matrices, applied by MVM (``Recmat`` and ``Intmat`` derive from it)
 
 **Specialized Components**
    * :class:`~specula.data_objects.laser_launch_telescope.LaserLaunchTelescope` - Laser guide star launcher geometry
@@ -59,7 +60,7 @@ Persistence and Data Flow
 SPECULA data objects implement specialized methods for seamless integration with the data storage and replay system:
 
 **Storage and Replay Integration**
-   Data objects work automatically with :class:`~specula.processing_objects.data_store.DataStore` and :class:`~specula.processing_objects.data_source.DataSource` through standardized methods:
+   Data objects work automatically with :class:`~iteras.processing_objects.data_store.DataStore` and :class:`~iteras.processing_objects.data_source.DataSource` through standardized methods:
 
    * :meth:`get_value` - Extracts the core numerical data for storage
    * :meth:`from_header` - Reconstructs objects from stored headers

@@ -4,6 +4,7 @@ from specula.base_processing_obj import BaseProcessingObj, InputDesc
 from specula.data_objects.intmat import Intmat
 from specula.connections import InputValue
 from specula.connections import InputList
+from iteras.lib import storage
 
 
 class MultiRecCalibrator(BaseProcessingObj):
@@ -36,13 +37,13 @@ class MultiRecCalibrator(BaseProcessingObj):
 
     def rec_path(self, i):
         if self._rec_filename:
-            return os.path.join(self._data_dir, self._rec_filename+str(i) + '.fits')
+            return storage.object_filename(os.path.join(self._data_dir, self._rec_filename + str(i)))
         else:
             return None
 
     def full_rec_path(self):
         if self._full_rec_filename:
-            return os.path.join(self._data_dir, self._full_rec_filename + '.fits')
+            return storage.object_filename(os.path.join(self._data_dir, self._full_rec_filename))
         else:
             return None
 

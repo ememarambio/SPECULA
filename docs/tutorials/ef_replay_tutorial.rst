@@ -122,8 +122,11 @@ in the example above: targeting ``ef_combinator13`` directly (instead of only
 ``prop``) also pulls in whatever feeds that combinator.
 
 **Result format:** ``compute_replay()`` returns a dict keyed by each entry in
-``output_refs``, each value a dict with ``'data'`` (the FITS primary array)
-and ``'times'`` (the saved time vector, or ``None`` if not available).
+``output_refs``, each value a dict with ``'data'`` (the stored data array)
+and ``'times'`` (the saved time vector, or ``None`` if not available). The
+results are saved in the format given by the ``data_format`` argument
+(``'fits'``, ``'npz'``, ``'npy'`` or ``'hdf5'``; by default the format of the
+data objects, as for ``FieldAnalyser``).
 
 Step 3: Caveats
 ------------------

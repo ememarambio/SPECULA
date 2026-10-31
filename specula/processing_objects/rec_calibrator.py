@@ -6,6 +6,7 @@ from specula.data_objects.intmat import Intmat
 from specula.processing_objects.dm import DM
 from specula.connections import InputValue
 from specula import np
+from iteras.lib import storage
 
 
 class RecCalibrator(BaseProcessingObj):
@@ -62,8 +63,7 @@ class RecCalibrator(BaseProcessingObj):
             self.noise_cov = self.to_xp(noise_cov)
 
         rec_path = os.path.join(self.data_dir, rec_tag)
-        if not rec_path.endswith('.fits'):
-            rec_path += '.fits'
+        rec_path = storage.object_filename(rec_path)
         if os.path.exists(rec_path) and not self.overwrite:
             raise FileExistsError(f'REC file {rec_path} already exists, please remove it')
         self.rec_path = rec_path

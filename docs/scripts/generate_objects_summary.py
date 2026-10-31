@@ -213,11 +213,14 @@ def generate_rst_table(category_name, modules, description='', include_io=False)
     """
     valid_classes = []
     skipped_modules = []
+    seen = set()
     for module_name, filepath in modules:
         module_classes = _iter_module_class_infos(module_name, filepath)
         if not module_classes:
             skipped_modules.append(module_name)
-        valid_classes.extend(module_classes)
+        # A class found in more than one module (alias modules) is listed once
+        valid_classes.extend(c for c in module_classes if c[2]['class'] not in seen)
+        seen.update(c[2]['class'] for c in module_classes)
 
     # For processing objects we require at least one importable class.
     # An empty summary is usually caused by hidden import errors and should fail docs build.
@@ -261,7 +264,9 @@ def generate_rst_table(category_name, modules, description='', include_io=False)
         ])
 
     for module_name, classname, info in valid_classes:
-        full_name = f"{module_name}.{classname}"
+        # The module that defines the class, where autodoc documents it: for
+        # the modules moved to iteras, not the specula alias that was scanned
+        full_name = f"{info['class'].__module__}.{classname}"
         lines.append(f'   * - :class:`~{full_name}`')
 
         desc = info['doc'] if info['doc'] else '*No description available.*'
@@ -317,6 +322,7 @@ def generate_rst_table(category_name, modules, description='', include_io=False)
 
 def main():
     specula_path = Path(__file__).parent.parent.parent / 'specula'
+    iteras_path = Path(__file__).parent.parent.parent / 'iteras'
     api_docs_path = Path(__file__).parent.parent / 'api'
     api_docs_path.mkdir(exist_ok=True)
 
@@ -341,7 +347,12 @@ def main():
 
     for cat in categories:
         print(f"Scanning {cat['path']}...")
-        modules = scan_package(cat['path'], cat['package'])
+        # Also the iteras package of the same kind: the classes moved there are
+        # found in both, and listed once (see generate_rst_table())
+        modules = sorted(scan_package(cat['path'], cat['package']) +
+                         scan_package(iteras_path / cat['path'].name,
+                                      cat['package'].replace('specula.', 'iteras.', 1)),
+                         key=lambda m: m[0].split('.')[-1])
         if not modules:
             print("  No modules found.")
             continue

@@ -11,7 +11,7 @@ Two complementary mechanisms are available:
 - **A trace file**, enabled with ``--trace-file``, with one line per object and phase, plus a
   summary table sorted by total time. It needs no external tool and also works on CPU.
 
-Both are implemented in :mod:`specula.tracing` and are driven by the simulation loop.
+Both are implemented in :mod:`iteras.tracing` and are driven by the simulation loop.
 
 Traced phases
 -------------
@@ -20,18 +20,18 @@ At every iteration, each processing object goes through these phases, in this or
 
 ``inputs``
     Gathering of inputs, including MPI receives and copies between devices
-    (:meth:`~specula.base_processing_obj.BaseProcessingObj.checkInputTimes`).
+    (:meth:`~iteras.base_processing_obj.BaseProcessingObj.checkInputTimes`).
 
 ``prepare_trigger``
-    :meth:`~specula.base_processing_obj.BaseProcessingObj.prepare_trigger`, only if the
+    :meth:`~iteras.base_processing_obj.BaseProcessingObj.prepare_trigger`, only if the
     object's inputs have been refreshed.
 
 ``trigger``
-    :meth:`~specula.base_processing_obj.BaseProcessingObj.trigger`: the actual computation
+    :meth:`~iteras.base_processing_obj.BaseProcessingObj.trigger`: the actual computation
     (``trigger_code()``, or the launch of its CUDA graph).
 
 ``post_trigger``
-    :meth:`~specula.base_processing_obj.BaseProcessingObj.post_trigger`.
+    :meth:`~iteras.base_processing_obj.BaseProcessingObj.post_trigger`.
 
 ``send_outputs``
     Sending of outputs to other MPI ranks. Only traced for objects with remote outputs.
@@ -80,7 +80,7 @@ If CuPy is not installed, or NVTX is not available, ranges are silently disabled
 
 All the phases above are already marked for every object, so there is no need to mark
 ``trigger_code()`` or the other phase methods. To split a phase into smaller sections, use
-:data:`specula.tracing.tracer` as a context manager or decorator:
+:data:`iteras.tracing.tracer` as a context manager or decorator:
 
 .. code-block:: python
 
@@ -244,7 +244,7 @@ The same options are available as arguments of :func:`specula.main_simul`:
     specula.main_simul(['params.yml'], trace_file='run.tsv', trace_skip=10,
                        trace_gpu_events=True)
 
-When using :class:`specula.simul.Simul` directly, open and close the tracer around the run:
+When using :class:`iteras.simul.Simul` directly, open and close the tracer around the run:
 
 .. code-block:: python
 

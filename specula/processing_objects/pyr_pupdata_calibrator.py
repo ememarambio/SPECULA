@@ -7,6 +7,7 @@ from specula.connections import InputValue
 from specula.data_objects.pupdata import PupData
 from specula.lib import utils
 from specula import cpuArray
+from iteras.lib import storage
 
 
 class PyrPupdataCalibrator(BaseProcessingObj):
@@ -577,8 +578,9 @@ class PyrPupdataCalibrator(BaseProcessingObj):
         Parameters
         ----------
         filename : str
-            Output filename (FITS format). If no extension is provided,
-            ``.fits`` is appended.
+            Output filename. If it has no FITS, npz or HDF5 extension, the
+            extension of the default format is appended (``.fits`` unless
+            ITERAS_DATA_FORMAT or SPECULA_DATA_FORMAT says otherwise).
 
         Raises
         ------
@@ -591,8 +593,7 @@ class PyrPupdataCalibrator(BaseProcessingObj):
         if self.pupdata is None:
             raise ValueError("No pupil data to save")
 
-        if not filename.endswith('.fits'):
-            filename += '.fits'
+        filename = storage.object_filename(filename)
         file_path = os.path.join(self.data_dir, filename)
 
         os.makedirs(os.path.dirname(file_path), exist_ok=True)

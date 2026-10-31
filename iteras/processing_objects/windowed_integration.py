@@ -1,0 +1,66 @@
+
+from iteras.data_objects.sim_params import SimParams
+from iteras.base_processing_obj import BaseProcessingObj, InputDesc, OutputDesc
+from iteras.connections import InputValue
+from iteras.base_value import BaseValue
+
+
+class WindowedIntegration(BaseProcessingObj):
+    """
+    Windowed Integration processing object.
+    Implements a simple windowed integration of a signal.
+    """
+    def __init__(self,
+                 simul_params: SimParams,
+                 n_elem: int,
+                 dt: float,
+                 start_time: float=0,
+                 update_time_on_dt: bool=False,
+                 target_device_idx: int=None,
+                 precision: int=None):
+        super().__init__(target_device_idx=target_device_idx, precision=precision)
+
+        self.loop_dt = self.seconds_to_t(simul_params.time_step)
+
+        self.dt = self.seconds_to_t(dt)
+        self.start_time = self.seconds_to_t(start_time)
+        self.update_time_on_dt = update_time_on_dt
+
+        if self.dt <= 0:
+            raise ValueError(f'dt (integration time) is {dt} and must be greater than zero')
+        if self.dt % self.loop_dt != 0:
+            raise ValueError(f'integration time dt={dt} must be a multiple '
+                             f'of the basic simulation time_step={simul_params.time_step}')
+
+        self.inputs['input'] = InputValue(type=BaseValue)
+
+        self.output = BaseValue(value=self.xp.zeros(n_elem, dtype=self.dtype),
+                                target_device_idx=target_device_idx,
+                                precision=precision)
+        self.outputs['output'] = self.output
+        self.integrated_value = self.xp.zeros(n_elem, dtype=self.dtype)
+
+    @classmethod
+    def input_names(cls):
+        return {'input': InputDesc(BaseValue, 'Input signal to integrate')}
+
+    @classmethod
+    def output_names(cls):
+        return {'output': OutputDesc(BaseValue, 'Windowed time-integrated output signal')}
+
+    def trigger_code(self):
+        if self.current_time >= self.start_time:
+            input = self.local_inputs['input']
+            self.output.value *= 0.0
+            self.integrated_value += input.value * self.loop_dt / self.dt
+
+            if (self.current_time + self.loop_dt - self.dt - self.start_time) % self.dt == 0:
+                self.output.value[:] = self.integrated_value
+                self.integrated_value *= 0.0
+                # update generation time only when output is produced
+                if self.update_time_on_dt:
+                    self.output.generation_time = self.current_time
+
+            # update generation time at every step
+            if not self.update_time_on_dt:
+                self.output.generation_time = self.current_time

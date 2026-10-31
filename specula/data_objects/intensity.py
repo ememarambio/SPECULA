@@ -1,8 +1,8 @@
 
 from astropy.io import fits
 
-from specula import cpuArray
 from specula.base_data_obj import BaseDataObj
+from iteras.lib import storage
 
 class Intensity(BaseDataObj):
     """
@@ -46,12 +46,8 @@ class Intensity(BaseDataObj):
         return hdr
 
     def save(self, filename, overwrite=True):
-        hdr = self.get_fits_header()
-        hdu = fits.PrimaryHDU(header=hdr)  # main HDU, empty, only header
-        hdul = fits.HDUList([hdu])
-        hdul.append(fits.ImageHDU(data=cpuArray(self.i), name='INTENSITY'))
-        hdul.writeto(filename, overwrite=overwrite)
-        hdul.close()  # Force close for Windows
+        storage.write_object(filename, self.get_fits_header(), {'intensity': self.i},
+                             overwrite=overwrite)
 
     @staticmethod
     def from_header(hdr, target_device_idx=None):
@@ -65,12 +61,12 @@ class Intensity(BaseDataObj):
     
     @staticmethod
     def restore(filename, target_device_idx=None):
-        hdr = fits.getheader(filename)
-        if 'OBJ_TYPE' not in hdr or hdr['OBJ_TYPE'] != 'Intensity':
-            raise ValueError(f"Error: file {filename} does not contain an Intensity object")
-        intensity = Intensity.from_header(hdr, target_device_idx=target_device_idx)
-        with fits.open(filename) as hdul:
-            intensity.i[:] = intensity.to_xp(hdul[1].data)  # pylint: disable=no-member
+        with storage.read_object(filename) as f:
+            hdr = f.header
+            if 'OBJ_TYPE' not in hdr or hdr['OBJ_TYPE'] != 'Intensity':
+                raise ValueError(f"Error: file {filename} does not contain an Intensity object")
+            intensity = Intensity.from_header(hdr, target_device_idx=target_device_idx)
+            intensity.i[:] = intensity.to_xp(f.read('intensity', 1))
         return intensity
 
     def array_for_display(self):

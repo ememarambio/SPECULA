@@ -31,10 +31,11 @@ class EfReplay(BaseReplayAnalyser):
                  end_time: Optional[float] = None,
                  display: bool = False,
                  log_level: Optional[str] = None,
-                 on_missing_downstream_consumers: str = 'error'):
+                 on_missing_downstream_consumers: str = 'error',
+                 data_format: Optional[str] = None):
 
         super().__init__(data_dir, tracking_number, start_time, end_time, display, log_level,
-                          on_missing_downstream_consumers)
+                          on_missing_downstream_consumers, data_format)
 
         self.output_refs = output_refs
         self._targets = sorted({ref.split('.')[0] for ref in output_refs})
@@ -61,7 +62,7 @@ class EfReplay(BaseReplayAnalyser):
         all_exist = True
         if not force_recompute:
             for ref in self.output_refs:
-                path = self.replay_output_dir / f"{self._ref_to_filename(ref)}.fits"
+                path = self._output_path(self.replay_output_dir, self._ref_to_filename(ref))
                 if not path.exists():
                     all_exist = False
                     break
@@ -78,7 +79,7 @@ class EfReplay(BaseReplayAnalyser):
         replay_params['data_store_efreplay'] = {
             'class': 'DataStore',
             'store_dir': str(self.replay_output_dir),
-            'data_format': 'fits',
+            'data_format': self.data_format,
             'create_tn': False,
             'inputs': {
                 'input_list': input_list
@@ -92,7 +93,7 @@ class EfReplay(BaseReplayAnalyser):
     def _load_efreplay_results(self) -> Dict[str, dict]:
         results = {}
         for ref in self.output_refs:
-            path = self.replay_output_dir / f"{self._ref_to_filename(ref)}.fits"
-            data, times = self._read_fits_primary_and_times(path)
+            path = self._output_path(self.replay_output_dir, self._ref_to_filename(ref))
+            data, times = self._read_data_and_times(path)
             results[ref] = {'data': data, 'times': times}
         return results

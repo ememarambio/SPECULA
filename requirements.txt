@@ -1,6 +1,7 @@
 numpy
 scipy
 astropy
+h5py
 matplotlib
 symao >= 1.0.1
 astro-seeing >= 1.1

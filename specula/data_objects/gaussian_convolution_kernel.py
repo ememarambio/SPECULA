@@ -1,7 +1,6 @@
 from specula.data_objects.convolution_kernel import ConvolutionKernel, lgs_map_sh
-from specula.lib.fits_io import load_fits_array
 
-from astropy.io import fits
+from iteras.lib import storage
 
 
 class GaussianConvolutionKernel(ConvolutionKernel):
@@ -73,39 +72,37 @@ class GaussianConvolutionKernel(ConvolutionKernel):
         Returns:
             :class:`~specula.data_objects.gaussian_convolution_kernel.GaussianConvolutionKernel`: The restored ConvolutionKernel object
         """
-        hdr = fits.getheader(filename, ext=0)  # Get header from primary HDU
-
-        version = hdr['VERSION']
-        if version != 1.1:
-            raise ValueError(f'Unknown version {version}. Only version=1.1 is supported')
-
-        if kernel_obj is None:
-            kernel_obj = GaussianConvolutionKernel(
-                dimx=hdr['DIMX'],
-                dimy=hdr['DIMY'],
-                pxscale=hdr['PXSCALE'],
-                dimension=hdr['DIM'],
-                spot_size=hdr['SPOTSIZE'],
-                oversampling=hdr['OVERSAMP'],
-                positive_shift_tt=hdr['POSTT'],
-                target_device_idx=target_device_idx)
-        else:
-            # If a kernel object is provided, use it
-            # check if the spot size matches
-            if kernel_obj.spot_size != hdr['SPOTSIZE']:
-                raise ValueError("Provided kernel object spot size does not match the FITS file spot size")
-            # check if the dimensions match
-            if kernel_obj.dimx != hdr['DIMX'] or kernel_obj.dimy != hdr['DIMY']:
-                raise ValueError("Provided kernel object dimensions do not match the FITS file dimensions")
-            # Read properties from header
-            kernel_obj.spot_size = hdr['SPOTSIZE']
-            kernel_obj.pxscale = hdr['PXSCALE']
-            kernel_obj.dimension = hdr['DIM']
-            kernel_obj.oversampling = hdr['OVERSAMP']
-            kernel_obj.positive_shift_tt = hdr['POSTT']
-
-        kernel_obj.real_kernels = load_fits_array(filename, ext=1,
-                                                  target_device_idx=kernel_obj.target_device_idx,
-                                                  precision=kernel_obj.precision)
+        with storage.read_object(filename) as f:
+            hdr = f.header
+            version = hdr['VERSION']
+            if version != 1.1:
+                raise ValueError(f'Unknown version {version}. Only version=1.1 is supported')
+            if kernel_obj is None:
+                kernel_obj = GaussianConvolutionKernel(
+                    dimx=hdr['DIMX'],
+                    dimy=hdr['DIMY'],
+                    pxscale=hdr['PXSCALE'],
+                    dimension=hdr['DIM'],
+                    spot_size=hdr['SPOTSIZE'],
+                    oversampling=hdr['OVERSAMP'],
+                    positive_shift_tt=hdr['POSTT'],
+                    target_device_idx=target_device_idx)
+            else:
+                # If a kernel object is provided, use it
+                # check if the spot size matches
+                if kernel_obj.spot_size != hdr['SPOTSIZE']:
+                    raise ValueError("Provided kernel object spot size does not match the FITS file spot size")
+                # check if the dimensions match
+                if kernel_obj.dimx != hdr['DIMX'] or kernel_obj.dimy != hdr['DIMY']:
+                    raise ValueError("Provided kernel object dimensions do not match the FITS file dimensions")
+                # Read properties from header
+                kernel_obj.spot_size = hdr['SPOTSIZE']
+                kernel_obj.pxscale = hdr['PXSCALE']
+                kernel_obj.dimension = hdr['DIM']
+                kernel_obj.oversampling = hdr['OVERSAMP']
+                kernel_obj.positive_shift_tt = hdr['POSTT']
+            kernel_obj.real_kernels = f.load('real_kernels', 1,
+                                             target_device_idx=kernel_obj.target_device_idx,
+                                             precision=kernel_obj.precision)
         kernel_obj.process_kernels(return_fft=return_fft)
         return kernel_obj

@@ -1,8 +1,7 @@
-import os
 from astropy.io import fits
-from specula import cpuArray
 
 from specula.base_data_obj import BaseDataObj
+from iteras.lib import storage
 
 
 class SpatioTempArray(BaseDataObj):
@@ -104,20 +103,9 @@ class SpatioTempArray(BaseDataObj):
         The array is stored in internal time-first layout as primary HDU
         and the time vector as an extension.
         """
-        filename = os.fspath(filename)
-        hdr = self.get_fits_header()
-
-        # Primary HDU with array
-        primary_hdu = fits.PrimaryHDU(cpuArray(self.array), header=hdr)
-
-        # Extension HDU with time vector
-        time_hdu = fits.ImageHDU(cpuArray(self.time_vector), name='TIME_VECTOR')
-
-        hdul = fits.HDUList([primary_hdu, time_hdu])
-        try:
-            hdul.writeto(filename, overwrite=True)
-        finally:
-            hdul.close()
+        storage.write_object(filename, self.get_fits_header(),
+                             {'array': self.array, 'time_vector': self.time_vector},
+                             layout='primary')
 
     @staticmethod
     def restore(filename, target_device_idx=None):
@@ -136,16 +124,12 @@ class SpatioTempArray(BaseDataObj):
         SpatioTempArray
             Restored object.
         """
-        filename = os.fspath(filename)
-        with fits.open(filename, memmap=False) as hdul:
-            hdr = hdul[0].header  # pylint: disable=no-member
-            version = hdr.get('VERSION')
+        with storage.read_object(filename) as f:
+            version = f.header.get('VERSION')
             if version != 1:
                 raise ValueError(f"Unknown version {version} in file {filename}")
-
-            array = hdul[0].data.copy()  # pylint: disable=no-member
-            time_vector = hdul['TIME_VECTOR'].data.copy()  # pylint: disable=no-member
-
+            array = f.read('array', 0)
+            time_vector = f.read('time_vector', 1)
         return SpatioTempArray(array, time_vector, time_axis=0, target_device_idx=target_device_idx)
 
     def array_for_display(self):

@@ -6,6 +6,12 @@ computing both J and K PSFs for each point. The WFS/controller is only run in
 the science stage. Run the commands below from the repository root with a
 Python environment containing SPECULA's dependencies.
 
+Upstream now bundles the `iteras` simulation engine and adds `h5py` to its
+requirements. Update the active environment after pulling with
+`python -m pip install -e .` from the repository root. This workflow explicitly
+saves telemetry as FITS, including when an environment variable selects another
+default storage format.
+
 ## Calibration
 
 The empirical input `calib/atm_dm_kl.fits` is a local prerequisite and is
@@ -22,8 +28,12 @@ python -m specula.scripts.specula_main --cpu config/START-SCAO/params_truthwfs_s
 
 The calibration root is `calib/ULTIMATE_SCAO_EMPIRICAL`. The importer refuses
 to replace existing products unless `--overwrite` is passed. The calibration
-YAML benches have `overwrite: true`. Existing compatible calibrations can be
-used directly. Displays are in `display.yml`, separate from these benches.
+YAML benches have `overwrite: true`. After updating from the older SHWFS model,
+rerun all three benches above: upstream's exact detector-pixel integration
+changes the sensor images, slope references, interaction matrices and
+reconstructors. Previously generated SH calibration products must be replaced.
+The empirical basis does not need to be reimported if it is already present.
+Displays are in `display.yml`, separate from these benches.
 
 ## Science run and field replay
 

@@ -29,6 +29,7 @@ from specula.display.slopec_display import SlopecDisplay
 from specula.display.psf_display import PsfDisplay
 from specula.display.plot_display import PlotDisplay
 from specula.display.modes_display import ModesDisplay
+from iteras.display.vector_values_display import VectorValuesDisplay
 from specula.display.plot_vector_display import PlotVectorDisplay
 from specula.display.double_phase_display import DoublePhaseDisplay
 from specula.display.display_recorder import DisplayRecorder
@@ -39,7 +40,7 @@ from test.specula_testlib import cpu_and_gpu
 # subclasses except DoublePhaseDisplay)
 DISPLAY_CLASSES_WITH_WINDOW_XY = [
     PixelsDisplay, PixelsPupDisplay, PlotDisplay, SlopecDisplay,
-    PhaseDisplay, PsfDisplay, ModesDisplay, PlotVectorDisplay,
+    PhaseDisplay, PsfDisplay, ModesDisplay, PlotVectorDisplay, VectorValuesDisplay,
 ]
 
 
@@ -433,6 +434,29 @@ class TestDisplays(unittest.TestCase):
         self.assertIsNotNone(display.ax)
         self.assertIsNotNone(display.fig)
 
+        matplotlib.pyplot.close(display.fig)
+
+    @pytest.mark.filterwarnings('ignore:.*Matplotlib is currently using agg*:UserWarning')
+    @cpu_and_gpu
+    def test_vector_values_display(self, target_device_idx, xp):
+        """VectorValuesDisplay of iteras, of which ModesDisplay is a SPECULA version"""
+        from iteras.display.vector_values_display import VectorValuesDisplay
+        from specula.display.modes_display import ModesDisplay
+        self.assertTrue(issubclass(ModesDisplay, VectorValuesDisplay))
+        self.assertIn('modes', ModesDisplay().inputs)
+
+        vector = BaseValue(value=xp.arange(10, dtype=xp.float32) - 3, target_device_idx=target_device_idx)
+        display = VectorValuesDisplay(title='Test Vector Values', ylabel='Speed')
+        display.inputs['value'].set(vector)
+        loop = LoopControl()
+        loop.add(display, idx=0)
+        for t in (1, 2):    # the first update creates the line, the second updates it
+            vector.generation_time = vector.seconds_to_t(t)
+            loop.run(run_time=1, dt=1, t0=t)
+        self.assertEqual(display.ax.get_ylabel(), 'Speed')
+        self.assertEqual(display.ax.get_xlabel(), 'Index')
+        # Scaled to the data, since no yrange is given
+        self.assertAlmostEqual(display.ax.get_ylim()[0], -3.3, places=5)
         matplotlib.pyplot.close(display.fig)
 
     @pytest.mark.filterwarnings('ignore:.*FigureCanvasAgg is non-interactive.*:UserWarning')

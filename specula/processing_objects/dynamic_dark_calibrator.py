@@ -5,6 +5,7 @@ from specula.data_objects.pixels import Pixels
 from specula.connections import InputValue
 from specula.lib import utils
 from specula.scalar_values import IntValue, StringValue
+from iteras.lib import storage
 
 
 class DynamicDarkCalibrator(BaseProcessingObj):
@@ -63,7 +64,7 @@ class DynamicDarkCalibrator(BaseProcessingObj):
         Dark frames are stored in FITS format.
 
     .. seealso::
-        :class:`~specula.base_processing_obj.BaseProcessingObj`,
+        :class:`~iteras.base_processing_obj.BaseProcessingObj`,
         :class:`~specula.data_objects.pixels.Pixels`
 
     """
@@ -167,8 +168,7 @@ class DynamicDarkCalibrator(BaseProcessingObj):
     def _load_darkframe(self, filename):
         """Load a dark frame from data_dir into the existing darkframe object,
         so that the out_darkframe output keeps referencing it, and stop integration."""
-        if not filename.endswith('.fits'):
-            filename += '.fits'
+        filename = storage.object_filename(filename)
         fullpath = os.path.join(self.data_dir, filename)
         restored = Pixels.restore(fullpath, target_device_idx=self.target_device_idx)
         if restored.pixels.shape != self.darkframe.pixels.shape:
@@ -243,8 +243,7 @@ class DynamicDarkCalibrator(BaseProcessingObj):
         if filename is None:
             filename = utils.make_tn()
 
-        if not filename.endswith('.fits'):
-            filename += '.fits'
+        filename = storage.object_filename(filename)
         file_path = os.path.join(self.data_dir, filename)
 
         os.makedirs(os.path.dirname(file_path), exist_ok=True)

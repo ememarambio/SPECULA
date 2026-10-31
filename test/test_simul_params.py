@@ -4,6 +4,8 @@ specula.init(0)  # Default target device
 import unittest
 
 from specula.data_objects.simul_params import SimulParams
+from specula.simul import Simul
+from iteras.data_objects.sim_params import SimParams
 
 
 class TestSimulParams(unittest.TestCase):
@@ -51,3 +53,56 @@ class TestSimulParams(unittest.TestCase):
 
         with self.assertRaises(ValueError):
             _ = SimulParams(add_modules=[3.1415, 42])
+
+    def test_positional_arguments(self):
+        """pixel_pupil and pixel_pitch are still the first two arguments"""
+        params = SimulParams(160, 0.05)
+        self.assertEqual(params.pixel_pupil, 160)
+        self.assertEqual(params.pixel_pitch, 0.05)
+
+    def test_is_iteras_sim_params(self):
+        """SimulParams adds the AO parameters to the generic iteras SimParams"""
+        self.assertTrue(issubclass(SimulParams, SimParams))
+        params = SimParams(total_time=1.0, time_step=0.01)
+        self.assertEqual(params.total_time, 1.0)
+        self.assertEqual(params.time_step, 0.01)
+        self.assertFalse(hasattr(params, 'pixel_pupil'))
+
+    def test_simul_finds_main_params_by_class(self):
+        """Simul uses the section whose class is SimParams or a subclass as main parameters"""
+        for classname in ['SimulParams', 'SimParams']:
+            params = {'other': {'class': 'BaseValue'},
+                      'main': {'class': classname, 'root_dir': 'dummy'},
+                      'broken': {'not_a_class': 1}}
+            simul = Simul('dummy.yml')
+            self.assertTrue(simul.is_main_params(params, 'main'))
+            self.assertFalse(simul.is_main_params(params, 'other'))
+            self.assertFalse(simul.is_main_params(params, 'broken'))
+            simul.setSimulParams(params)
+            self.assertEqual(simul.mainParams['root_dir'], 'dummy')
+
+    def test_main_params_defaults(self):
+        """
+        The main parameters not in the parameter file have the default values of
+        their class, except time_step and total_time, which are required
+        """
+        params = {'main': {'class': 'SimParams', 'time_step': 0.01}}
+        simul = Simul('dummy.yml')
+        simul.setSimulParams(params)
+        self.assertEqual(simul.mainParams['time_step'], 0.01)
+        self.assertEqual(simul.mainParams['root_dir'], '.')
+        self.assertEqual(simul.mainParams['add_modules'], [])
+        self.assertNotIn('total_time', simul.mainParams)
+        # The parameters are not modified
+        self.assertEqual(params['main'], {'class': 'SimParams', 'time_step': 0.01})
+
+    def test_time_base_is_required(self):
+        """A parameter file without time_step or total_time is an error"""
+        for main in ({'class': 'SimParams', 'time_step': 0.01},
+                     {'class': 'SimulParams', 'total_time': 1.0, 'time_stpe': 0.01}):
+            with self.subTest(main=main):
+                simul = Simul('dummy.yml')
+                with self.assertRaisesRegex(ValueError, "'main' section.*(total_time|time_step)"):
+                    simul.check_time_base({'main': main})
+                main = dict(main, time_step=0.01, total_time=1.0)
+                simul.check_time_base({'main': main})

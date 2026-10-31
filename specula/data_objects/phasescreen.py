@@ -1,8 +1,8 @@
 
 from astropy.io import fits
 
-from specula import cpuArray
 from specula.base_data_obj import BaseDataObj
+from iteras.lib import storage
 
 class Phasescreen(BaseDataObj):
     """
@@ -49,11 +49,8 @@ class Phasescreen(BaseDataObj):
         return hdr
 
     def save(self, filename, overwrite=True):
-        hdr = self.get_fits_header()
-        hdu = fits.PrimaryHDU(header=hdr, data=cpuArray(self.phasescreen))
-        hdul = fits.HDUList([hdu])
-        hdul.writeto(filename, overwrite=overwrite)
-        hdul.close()  # Force close for Windows
+        storage.write_object(filename, self.get_fits_header(), {'phasescreen': self.phasescreen},
+                             layout='primary', overwrite=overwrite)
 
     @staticmethod
     def from_header(hdr, target_device_idx=None):
@@ -69,12 +66,12 @@ class Phasescreen(BaseDataObj):
     
     @staticmethod
     def restore(filename, target_device_idx=None):
-        hdr = fits.getheader(filename)
-        if 'OBJ_TYPE' not in hdr or hdr['OBJ_TYPE'] != 'Phasescreen':
-            raise ValueError(f"Error: file {filename} does not contain a Phasescreen object")
-        phasescreen = Phasescreen.from_header(hdr, target_device_idx=target_device_idx)
-        with fits.open(filename) as hdul:
-            phasescreen.phasescreen[:] = phasescreen.to_xp(hdul[0].data)  # pylint: disable=no-member
+        with storage.read_object(filename) as f:
+            hdr = f.header
+            if 'OBJ_TYPE' not in hdr or hdr['OBJ_TYPE'] != 'Phasescreen':
+                raise ValueError(f"Error: file {filename} does not contain a Phasescreen object")
+            phasescreen = Phasescreen.from_header(hdr, target_device_idx=target_device_idx)
+            phasescreen.phasescreen[:] = phasescreen.to_xp(f.read('phasescreen', 0))
         return phasescreen
 
     def array_for_display(self):

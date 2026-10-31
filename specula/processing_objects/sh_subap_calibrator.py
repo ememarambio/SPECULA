@@ -6,6 +6,7 @@ from specula.data_objects.lenslet import Lenslet
 from specula.connections import InputValue
 from specula.data_objects.pixels import Pixels
 from specula.data_objects.subap_data import SubapData
+from iteras.lib import storage
 
 
 class ShSubapCalibrator(BaseProcessingObj):
@@ -61,8 +62,7 @@ class ShSubapCalibrator(BaseProcessingObj):
 
     def finalize(self):
         filename = self._filename
-        if not filename.endswith('.fits'):
-            filename += '.fits'
+        filename = storage.object_filename(filename)
         file_path = os.path.join(self._data_dir, filename)
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         self.subaps.save(os.path.join(self._data_dir, filename), overwrite=self._overwrite)

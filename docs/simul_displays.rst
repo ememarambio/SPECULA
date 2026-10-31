@@ -44,7 +44,8 @@ Displays for scalar values, vectors, and temporal evolution of quantities.
 
 * ``PlotDisplay`` - Scalar or curve plotting
 * ``PlotVectorDisplay`` - Vector and time-history visualization
-* ``ModesDisplay`` - Modal coefficient plotting
+* ``VectorValuesDisplay`` - Current values of a vector, as a function of their index (input ``value``)
+* ``ModesDisplay`` - Modal coefficient plotting: a ``VectorValuesDisplay`` with the input ``modes``
 
 Typical applications include:
 
@@ -96,7 +97,7 @@ simulation time. The ``--async-displays`` command line flag moves all displays t
     specula params.yml --async-displays
 
 When embedding SPECULA in a Python program, the same behavior is selected with the
-``async_displays=True`` argument of :class:`specula.simul.Simul` or :func:`specula.main_simul`.
+``async_displays=True`` argument of :class:`iteras.simul.Simul` or :func:`specula.main_simul`.
 The display process is started with the multiprocessing *spawn* method, which imports the main
 script again in the new process, so the script must protect its top-level code with the usual guard:
 
@@ -136,14 +137,15 @@ This mode has some limitations:
 * ``DisplayRecorder`` is not supported, since the windows it records live in another process:
   an error is raised if it is used together with ``--async-displays``.
 
-Custom displays that accumulate data over time, and so must receive every update, should set the
-``skip_updates`` class attribute to ``False``:
+Custom displays that accumulate data over time, and so must receive every update, should override
+the ``can_skip_updates()`` method to return ``False``:
 
 .. code-block:: python
 
     class MyHistoryDisplay(BaseDisplay):
 
-        skip_updates = False   # keep every point of the history
+        def can_skip_updates(self):
+            return False    # keep every point of the history
 
 All the display code runs in the display process, where the figure is. There, the inputs of each
 display are set to CPU copies of the simulation data. ``setup()`` is called before the first update,

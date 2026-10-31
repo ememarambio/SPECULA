@@ -1,7 +1,7 @@
 from astropy.io import fits
-from specula import cpuArray
 
 from specula.base_data_obj import BaseDataObj
+from iteras.lib import storage
 
 
 class Pixels(BaseDataObj):
@@ -113,12 +113,8 @@ class Pixels(BaseDataObj):
         return hdr
 
     def save(self, filename, overwrite=True):
-        hdr = self.get_fits_header()
-        hdu = fits.PrimaryHDU(header=hdr)  # main HDU, empty, only header
-        hdul = fits.HDUList([hdu])
-        hdul.append(fits.ImageHDU(data=cpuArray(self.pixels), name='PIXELS'))
-        hdul.writeto(filename, overwrite=overwrite)
-        hdul.close()  # Force close for Windows
+        storage.write_object(filename, self.get_fits_header(), {'pixels': self.pixels},
+                             overwrite=overwrite)
 
     @staticmethod
     def from_header(hdr, target_device_idx=None):
@@ -135,9 +131,9 @@ class Pixels(BaseDataObj):
 
     @staticmethod
     def restore(filename, target_device_idx=None):
-        hdr = fits.getheader(filename)
-        pixels = Pixels.from_header(hdr, target_device_idx=target_device_idx)
-        pixels.set_value(fits.getdata(filename, ext=1))
+        with storage.read_object(filename) as f:
+            pixels = Pixels.from_header(f.header, target_device_idx=target_device_idx)
+            pixels.set_value(f.read('pixels', 1))
         return pixels
 
     def array_for_display(self):

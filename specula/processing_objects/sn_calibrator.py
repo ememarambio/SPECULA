@@ -3,6 +3,7 @@ import os
 from specula.base_processing_obj import BaseProcessingObj, InputDesc
 from specula.data_objects.slopes import Slopes
 from specula.connections import InputValue
+from iteras.lib import storage
 
 
 class SnCalibrator(BaseProcessingObj):
@@ -28,8 +29,7 @@ class SnCalibrator(BaseProcessingObj):
         self.inputs['in_slopes'] = InputValue(type=Slopes)
 
         self.sn_path = os.path.join(self._data_dir, self._filename)
-        if not self.sn_path.endswith('.fits'):
-            self.sn_path += '.fits'
+        self.sn_path = storage.object_filename(self.sn_path)
         if os.path.exists(self.sn_path) and not self.overwrite:
             raise FileExistsError(f'Slope null file {self.sn_path} already exists, please remove it')
 
@@ -53,8 +53,7 @@ class SnCalibrator(BaseProcessingObj):
         # n_iter is used to normalize a slope null computed as average of several slopes
         self.slopes.slopes /= self._n_iter
         filename = self._filename
-        if not filename.endswith('.fits'):
-            filename += '.fits'
+        filename = storage.object_filename(filename)
         file_path = os.path.join(self._data_dir, filename)
         os.makedirs(os.path.dirname(file_path), exist_ok=True)
         self.slopes.save(file_path,overwrite=self.overwrite)

@@ -107,7 +107,7 @@ class AVC(BaseProcessingObj):
         Correction u[k], computed at the previous iteration and summed
         over the instances of each channel, ready to be added to the loop
         command (e.g. with
-        :py:class:`~specula.processing_objects.base_operation.BaseOperation`
+        :py:class:`~iteras.processing_objects.base_operation.BaseOperation`
         and ``sum=True``).
     out_freq : BaseValue, one value per instance
         Current frequency estimates [Hz], in the order of ``freq``.

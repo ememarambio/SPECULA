@@ -2,7 +2,7 @@ import specula
 specula.init(0)  # Default target device
 
 import os
-import shutil
+import tempfile
 import unittest
 from astropy.io import fits
 
@@ -14,7 +14,10 @@ from test.specula_testlib import iter_data_object_classes
 class TestCalibManager(unittest.TestCase):
 
     def setUp(self):
-        self.rootdir = os.path.join(os.path.dirname(__file__), 'data', 'test_calib')
+        # A new local temporary directory for each test: files left by a previous
+        # run (removing them can fail on network file systems) made the tests fail
+        self._tmp = tempfile.TemporaryDirectory()
+        self.rootdir = os.path.join(self._tmp.name, 'test_calib')
         self.subdir = 'm2c'
         self.filename = os.path.join(self.rootdir, self.subdir, 'test_calibmanager.fits')
 
@@ -25,10 +28,7 @@ class TestCalibManager(unittest.TestCase):
         os.makedirs(os.path.join(self.rootdir, real_data_dir), exist_ok=True)
 
     def tearDown(self):
-        try:
-            shutil.rmtree(self.rootdir, ignore_errors=True)
-        except FileNotFoundError:
-            pass
+        self._tmp.cleanup()
 
     def test_calibmanager_filename(self):
         '''Test that the *filename()* method correctly joins subdir and name'''

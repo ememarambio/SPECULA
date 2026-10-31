@@ -760,11 +760,11 @@ class TestReplayPrecisionHandling(unittest.TestCase):
     def test_ensure_replay_precision_calls_specula_init_on_mismatch(self):
         from unittest.mock import patch
         analyzer, _ = self._make_analyzer('ensure_precision_mismatch')
-        with patch('specula.base_replay_analyser.specula.init') as mock_init, \
-             patch('specula.base_replay_analyser.specula.global_precision', 0), \
-             patch('specula.base_replay_analyser.specula.default_target_device_idx', -1), \
-             patch('specula.base_replay_analyser.specula.process_rank', None), \
-             patch('specula.base_replay_analyser.specula.process_comm', None):
+        with patch('specula.base_replay_analyser.iteras.init') as mock_init, \
+             patch('specula.base_replay_analyser.iteras.global_precision', 0), \
+             patch('specula.base_replay_analyser.iteras.default_target_device_idx', -1), \
+             patch('specula.base_replay_analyser.iteras.process_rank', None), \
+             patch('specula.base_replay_analyser.iteras.process_comm', None):
             analyzer._ensure_replay_precision(1)
 
         mock_init.assert_called_once_with(
@@ -777,8 +777,8 @@ class TestReplayPrecisionHandling(unittest.TestCase):
     def test_ensure_replay_precision_skips_if_already_matching(self):
         from unittest.mock import patch
         analyzer, _ = self._make_analyzer('ensure_precision_match')
-        with patch('specula.base_replay_analyser.specula.init') as mock_init, \
-             patch('specula.base_replay_analyser.specula.global_precision', 1):
+        with patch('specula.base_replay_analyser.iteras.init') as mock_init, \
+             patch('specula.base_replay_analyser.iteras.global_precision', 1):
             analyzer._ensure_replay_precision(1)
 
         mock_init.assert_not_called()
@@ -1036,9 +1036,9 @@ class TestFieldAnalyserWeakSpots(unittest.TestCase):
         from unittest.mock import patch
         analyzer = self._make_analyzer('precision_target_none')
 
-        with patch('specula.base_replay_analyser.specula.init') as mock_init, \
-             patch('specula.base_replay_analyser.specula.global_precision', 0), \
-             patch('specula.base_replay_analyser.specula.default_target_device_idx', None):
+        with patch('specula.base_replay_analyser.iteras.init') as mock_init, \
+             patch('specula.base_replay_analyser.iteras.global_precision', 0), \
+             patch('specula.base_replay_analyser.iteras.default_target_device_idx', None):
             analyzer._ensure_replay_precision(1)
 
         mock_init.assert_not_called()
@@ -1171,3 +1171,59 @@ class TestFieldAnalyserRunTiming(unittest.TestCase):
             analyzer._run_simulation_with_params({'dummy': 'params'}, output_dir)
 
         mock_instance.run.assert_called_once_with(start_time=0.1, end_time=None)
+
+
+class TestDataFormat(unittest.TestCase):
+    """Format of the results saved and read by FieldAnalyser (see iteras.lib.storage)"""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.datadir = self._tmp.name
+        tn_dir = os.path.join(self.datadir, 'format_tn')
+        os.makedirs(tn_dir)
+        params = {'main': {'class': 'SimulParams', 'pixel_pupil': 8, 'pixel_pitch': 1.0},
+                  'prop': {'class': 'AtmoPropagation'}}
+        with open(os.path.join(tn_dir, 'params.yml'), 'w', encoding='utf-8') as f:
+            yaml.dump(params, f)
+
+    def _make_analyzer(self, **kwargs):
+        return FieldAnalyser(data_dir=self.datadir, tracking_number='format_tn',
+                             polar_coordinates=np.array([[0.0, 0.0]]), **kwargs)
+
+    def test_default_and_explicit_formats(self):
+        env = {k: v for k, v in os.environ.items()
+               if k not in ('ITERAS_DATA_FORMAT', 'SPECULA_DATA_FORMAT')}
+        with patch.dict(os.environ, env, clear=True):
+            self.assertEqual(self._make_analyzer().data_format, 'fits')
+            os.environ['SPECULA_DATA_FORMAT'] = 'npz'
+            self.assertEqual(self._make_analyzer().data_format, 'npz')
+        self.assertEqual(self._make_analyzer(data_format='hdf5').data_format, 'hdf5')
+        # The results are read back as data objects files: pickle is not supported
+        with self.assertRaisesRegex(ValueError, 'data_format'):
+            self._make_analyzer(data_format='pickle')
+
+    def test_datastore_format_and_results(self):
+        """The replay DataStore saves in data_format, and the results are read from those files"""
+        from iteras.lib import storage
+        analyzer = self._make_analyzer(data_format='npz')
+        modal_params = {'nmodes': 3, 'type_str': 'zernike'}
+        with patch.object(analyzer, '_build_replay_params_from_datastore',
+                          return_value={'main': {'pixel_pupil': 8}, 'prop': {'class': 'AtmoPropagation'}}), \
+             patch.object(analyzer, '_add_field_sources_to_params'):
+            params = analyzer._build_replay_params_modal(modal_params)
+        stores = [p for p in params.values() if isinstance(p, dict) and p.get('class') == 'DataStore']
+        self.assertTrue(stores)
+        self.assertTrue(all(p['data_format'] == 'npz' for p in stores))
+
+        # A file as saved by the DataStore: data and times
+        coeffs = np.arange(6, dtype=np.float32).reshape(2, 3)
+        name = analyzer._get_modal_filename(analyzer.sources[0], modal_params)
+        os.makedirs(analyzer.modal_output_dir, exist_ok=True)
+        path = analyzer._output_path(analyzer.modal_output_dir, name)
+        self.assertEqual(path.suffix, '.npz')
+        storage.write_object(path, {}, {'data': coeffs, 'times': np.array([0, 1], dtype=np.uint64)},
+                             layout='primary')
+        results = analyzer._load_modal_results(modal_params)
+        np.testing.assert_array_equal(results['modal_coeffs'][0], coeffs)
+        np.testing.assert_allclose(results['residual_average'][0], coeffs.mean(axis=0))

@@ -6,7 +6,7 @@ from astropy.io import fits
 from specula.data_objects.layer import Layer
 from specula.lib.make_mask import make_mask
 from specula.data_objects.simul_params import SimulParams
-from specula import cpuArray
+from iteras.lib import storage
 
 class Pupilstop(Layer):
     """
@@ -85,13 +85,9 @@ class Pupilstop(Layer):
         return hdr
 
     def save(self, filename, overwrite=True):
-        hdr = self.get_fits_header()
-        hdu = fits.PrimaryHDU(header=hdr)  # main HDU, empty, only header
-        hdul = fits.HDUList([hdu])
-        hdul.append(fits.ImageHDU(data=cpuArray(self.field[0]), name='AMPLITUDE'))
         # phaseInNm is not used in Pupilstop
-        hdul.writeto(filename, overwrite=overwrite)
-        hdul.close()  # Force close for Windows
+        storage.write_object(filename, self.get_fits_header(), {'amplitude': self.field[0]},
+                             overwrite=overwrite)
 
     @staticmethod
     def from_header(hdr, target_device_idx=None):
@@ -111,19 +107,18 @@ class Pupilstop(Layer):
 
     @staticmethod
     def restore(filename, target_device_idx=None):
-        hdr = fits.getheader(filename)
-        if 'OBJ_TYPE' not in hdr or hdr['OBJ_TYPE'] != 'Pupilstop':
-            # Maybe it's a PASSATA object
-            try:
-                return Pupilstop.restore_from_passata(filename, target_device_idx)
-            except ValueError as exc:
-                raise ValueError(f"Error: file {filename} does not contain a SPECULA or PASSATA Pupilstop object") from exc
-
-        pupilstop = Pupilstop.from_header(hdr, target_device_idx=target_device_idx)
-        with fits.open(filename) as hdul:
-            pupilstop.field[0, :] = pupilstop.to_xp(hdul[1].data, dtype=pupilstop.dtype)  # pylint: disable=no-member
-            # phaseInNm is not used in Pupilstop
-        return pupilstop
+        with storage.read_object(filename) as f:
+            hdr = f.header
+            if 'OBJ_TYPE' in hdr and hdr['OBJ_TYPE'] == 'Pupilstop':
+                pupilstop = Pupilstop.from_header(hdr, target_device_idx=target_device_idx)
+                pupilstop.field[0, :] = pupilstop.to_xp(f.read('amplitude', 1), dtype=pupilstop.dtype)
+                # phaseInNm is not used in Pupilstop
+                return pupilstop
+        # Maybe it's a PASSATA object
+        try:
+            return Pupilstop.restore_from_passata(filename, target_device_idx)
+        except ValueError as exc:
+            raise ValueError(f"Error: file {filename} does not contain a SPECULA or PASSATA Pupilstop object") from exc
 
     @staticmethod
     def restore_from_passata(filename, target_device_idx=None):

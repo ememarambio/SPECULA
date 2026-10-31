@@ -3,6 +3,7 @@ from astropy.io import fits
 
 from specula.base_data_obj import BaseDataObj
 from specula import cpuArray
+from iteras.lib import storage
 
 class PupData(BaseDataObj):
     """
@@ -132,36 +133,27 @@ class PupData(BaseDataObj):
         return hdr
 
     def save(self, filename, overwrite=False):
-        hdr = self.get_fits_header()
-        fits.writeto(filename, np.zeros(2), hdr, overwrite=overwrite)
-        fits.append(filename, cpuArray(self.ind_pup))
-        fits.append(filename, cpuArray(self.radius))
-        fits.append(filename, cpuArray(self.cx))
-        fits.append(filename, cpuArray(self.cy))
+        storage.write_object(filename, self.get_fits_header(),
+                             {'ind_pup': self.ind_pup, 'radius': self.radius,
+                              'cx': self.cx, 'cy': self.cy},
+                             layout='placeholder', overwrite=overwrite)
 
     @staticmethod
     def restore(filename, target_device_idx=None):
         """Restores the pupil data from a file."""
-
-        # pylint: disable=no-member
-        with fits.open(filename) as hdul:
-            hdr = hdul[0].header
+        with storage.read_object(filename) as f:
+            hdr = f.header
             version = hdr.get('VERSION')
             if version is None or version < 2:
                 raise ValueError(f"Unsupported version {version} in file {filename}. Expected version >= 2")
             if version > 2:
                 raise ValueError(f"Unknown version {version} in file {filename}")
-
             framesize = [int(hdr.get('FSIZEX')), int(hdr.get('FSIZEY'))]
-            ind_pup = hdul[1].data.copy()
-            radius = hdul[2].data.copy()
-            cx = hdul[3].data.copy()
+            ind_pup = f.read('ind_pup', 1)
+            radius = f.read('radius', 2)
+            cx = f.read('cx', 3)
             # Workaround for ANDES pupil files missing the last HDU
-            if len(hdul) >= 5:
-                cy = hdul[4].data.copy()
-            else:
-                cy = None
-
+            cy = f.read('cy', 4) if f.has('cy', 4) else None
         return PupData(ind_pup=ind_pup, radius=radius, cx=cx, cy=cy, framesize=framesize,
                 target_device_idx=target_device_idx)
 

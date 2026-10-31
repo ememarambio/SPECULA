@@ -1,7 +1,7 @@
 import unittest
 import os
-import shutil
 import glob
+import tempfile
 import specula
 specula.init(-1,precision=1)  # Default target device
 
@@ -14,17 +14,16 @@ class TestTimeHistoryIntegration(unittest.TestCase):
     
     def setUp(self):
         self.datadir = os.path.join(os.path.dirname(__file__), 'data')
-        self.outputdir = os.path.join(os.path.dirname(__file__), 'output_timehistory')
+        # Output in a local temporary directory: deleting files in the test
+        # directory can fail on network file systems (NFS)
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.outputdir = self._tmp.name
 
         # Get current working directory
         self.cwd = os.getcwd()
     
     def tearDown(self):
-        """Clean up after test by removing generated files"""
-        # Remove test/data directory with timestamp
-        if os.path.exists(self.outputdir):
-            shutil.rmtree(self.outputdir)
-        
         # Change back to original directory
         os.chdir(self.cwd)
     
@@ -36,7 +35,7 @@ class TestTimeHistoryIntegration(unittest.TestCase):
 
         # Run the simulation
         yml_files = ['params_timehistory_test.yml']
-        simul = Simul(*yml_files)
+        simul = Simul(*yml_files, overrides=f"{{data_store.store_dir: '{self.outputdir}'}}")
         simul.run()
             
         # Find the most recent data directory (with timestamp)
@@ -49,8 +48,8 @@ class TestTimeHistoryIntegration(unittest.TestCase):
         self.assertTrue(os.path.exists(timehist_path), 
                        f"timehist.fits not found in {latest_output_dir}")
             
-        # Read output time history file
-        with fits.open(timehist_path) as hdul:
+        # Read output time history file (without memory mapping, which would keep it open)
+        with fits.open(timehist_path, memmap=False) as hdul:
             self.assertTrue(len(hdul) >= 1, "No data found in timehist.fits")
             self.assertTrue(hasattr(hdul[0], 'data') and hdul[0].data is not None, 
                            "No data found in first HDU of timehist.fits")

@@ -1,7 +1,7 @@
 from astropy.io import fits
-from specula import cpuArray
 
 from specula.data_objects.electric_field import ElectricField
+from iteras.lib import storage
 
 class Layer(ElectricField):
     """
@@ -52,6 +52,9 @@ class Layer(ElectricField):
 
     # get_value and set_value are inherited from ElectricField
 
+    def debug_summary(self):
+        return self.phaseInNm
+
     def get_fits_header(self):
         hdr = fits.Header()
         hdr['VERSION'] = 1
@@ -67,13 +70,9 @@ class Layer(ElectricField):
         return hdr
 
     def save(self, filename, overwrite=True):
-        hdr = self.get_fits_header()
-        hdu = fits.PrimaryHDU(header=hdr)  # main HDU, empty, only header
-        hdul = fits.HDUList([hdu])
-        hdul.append(fits.ImageHDU(data=cpuArray(self.field[0]), name='AMPLITUDE'))
-        hdul.append(fits.ImageHDU(data=cpuArray(self.field[1]), name='PHASE'))
-        hdul.writeto(filename, overwrite=overwrite)
-        hdul.close()  # Force close for Windows
+        storage.write_object(filename, self.get_fits_header(),
+                             {'amplitude': self.field[0], 'phase': self.field[1]},
+                             overwrite=overwrite)
 
     @staticmethod
     def from_header(hdr, target_device_idx=None):
@@ -93,13 +92,13 @@ class Layer(ElectricField):
 
     @staticmethod
     def restore(filename, target_device_idx=None):
-        hdr = fits.getheader(filename)
-        if 'OBJ_TYPE' not in hdr or hdr['OBJ_TYPE'] != 'Layer':
-            raise ValueError(f"Error: file {filename} does not contain a Layer object")
-        layer = Layer.from_header(hdr, target_device_idx=target_device_idx)
-        with fits.open(filename) as hdul:
-            layer.field[0, :] = layer.to_xp(hdul[1].data)  # pylint: disable=no-member
-            layer.field[1, :] = layer.to_xp(hdul[2].data)  # pylint: disable=no-member
-        return layer
+        with storage.read_object(filename) as f:
+            hdr = f.header
+            if 'OBJ_TYPE' not in hdr or hdr['OBJ_TYPE'] != 'Layer':
+                raise ValueError(f"Error: file {filename} does not contain a Layer object")
+            obj = Layer.from_header(hdr, target_device_idx=target_device_idx)
+            obj.field[0, :] = obj.to_xp(f.read('amplitude', 1))
+            obj.field[1, :] = obj.to_xp(f.read('phase', 2))
+        return obj
 
     # array_for_display is inherited from ElectricField

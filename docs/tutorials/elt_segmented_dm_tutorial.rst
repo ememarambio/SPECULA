@@ -528,7 +528,7 @@ Saving the modal basis
 
 This last step, a pseudo-inverse of a (4000 modes, many pixels) matrix,
 adds a further few minutes. ``IFunc.inverse()`` computes it via the smaller
-of the two Gram matrices (:func:`specula.lib.fast_pinv.fast_pinv`) rather
+of the two Gram matrices (:func:`iteras.lib.fast_pinv.fast_pinv`) rather
 than an SVD of the full rectangular matrix, which is what makes this
 tractable at this scale.
 

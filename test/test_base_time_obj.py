@@ -36,7 +36,7 @@ class TestBaseValue(unittest.TestCase):
     @cpu_and_gpu
     def test_init_uses_global_precision_if_none(self, target_device_idx, xp):
         """If precision is None, global_precision should be used."""
-        with patch("specula.base_time_obj.global_precision", 1):
+        with patch("iteras.global_precision", 1):
             obj = BaseTimeObj(target_device_idx=target_device_idx)
             self.assertEqual(obj.precision, 1)
 
@@ -46,7 +46,7 @@ class TestBaseValue(unittest.TestCase):
         if target_device_idx < 0:
             self.skipTest("CPU mode — not applicable")
 
-        with patch("specula.base_time_obj.cp.cuda.Device") as mock_device:
+        with patch("iteras.cp.cuda.Device") as mock_device:
             mock_device.return_value = MagicMock()
             obj = BaseTimeObj(target_device_idx=target_device_idx)
             mock_device.assert_called_once_with(target_device_idx)
@@ -73,7 +73,7 @@ class TestBaseValue(unittest.TestCase):
 
         obj = BaseTimeObj(target_device_idx=target_device_idx)
 
-        with patch("specula.base_time_obj.cp.get_default_memory_pool") as mock_pool:
+        with patch("iteras.cp.get_default_memory_pool") as mock_pool:
             mock_pool.return_value.used_bytes.side_effect = [1000, 2500]
             obj.startMemUsageCount()
             obj.stopMemUsageCount()
@@ -132,6 +132,54 @@ class TestBaseValue(unittest.TestCase):
         yc, xc = obj.ndimage_center_of_mass(arr)
         self.assertAlmostEqual(float(yc), 1.0)
         self.assertAlmostEqual(float(xc), 3.0)
+
+    @cpu_and_gpu
+    def test_scipy_helpers_follow_device(self, target_device_idx, xp):
+        """The scipy helpers come from scipy on CPU and from cupyx on GPU"""
+        obj = BaseTimeObj(target_device_idx=target_device_idx)
+        if target_device_idx >= 0:  # pragma: gpu
+            import cupyx.scipy.ndimage, cupyx.scipy.fft, cupyx.scipy.linalg
+            expected = {'ndimage_rotate': cupyx.scipy.ndimage.rotate,
+                        'ndimage_shift': cupyx.scipy.ndimage.shift,
+                        'ndimage_center_of_mass': cupyx.scipy.ndimage.center_of_mass,
+                        '_scipy_ifft2': cupyx.scipy.fft.ifft2,
+                        'dct': cupyx.scipy.fft.dct, 'idct': cupyx.scipy.fft.idct,
+                        '_lu_factor': cupyx.scipy.linalg.lu_factor,
+                        '_lu_solve': cupyx.scipy.linalg.lu_solve}
+        else:
+            import scipy.ndimage, scipy.fft, scipy.fftpack, scipy.linalg
+            expected = {'ndimage_rotate': scipy.ndimage.rotate,
+                        'ndimage_shift': scipy.ndimage.shift,
+                        'ndimage_center_of_mass': scipy.ndimage.center_of_mass,
+                        '_scipy_ifft2': scipy.fft.ifft2,
+                        'dct': scipy.fftpack.dct, 'idct': scipy.fftpack.idct,
+                        '_lu_factor': scipy.linalg.lu_factor,
+                        '_lu_solve': scipy.linalg.lu_solve}
+        for name, func in expected.items():
+            with self.subTest(name=name):
+                self.assertIs(getattr(obj, name), func)
+        # Not stored in the object (e.g. when it is pickled)
+        self.assertFalse(set(expected) & set(vars(obj)))
+
+    @unittest.skipIf(specula.cp is None, "needs a GPU to copy to")
+    def test_scipy_helpers_after_copy_to(self):
+        """A data object copied to another device gets the helpers of that device"""
+        from specula.base_value import BaseValue
+        import scipy.ndimage
+        import cupyx.scipy.ndimage
+        gpu_value = BaseValue(value=specula.cp.zeros(3), target_device_idx=0)
+        cpu_value = gpu_value.copyTo(-1)
+        self.assertIs(gpu_value.ndimage_shift, cupyx.scipy.ndimage.shift)
+        self.assertIs(cpu_value.ndimage_shift, scipy.ndimage.shift)
+
+    def test_scipy_helpers_not_imported_at_creation(self):
+        """Creating objects does not import the scipy helper modules"""
+        r = self._run_python('import sys; import iteras; iteras.init(-1); '
+                             'from iteras.base_value import BaseValue; BaseValue(); '
+                             'loaded = [m for m in ("scipy.ndimage", "scipy.linalg", "scipy.fftpack") '
+                             'if m in sys.modules]; '
+                             'assert not loaded, loaded')
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     # ------ Time resolution tests
 
@@ -226,13 +274,15 @@ class TestBaseValue(unittest.TestCase):
     def test_uninitialized_raises(self):
         r = self._run_python('from specula.base_time_obj import BaseTimeObj; BaseTimeObj()')
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn('SPECULA is not initialized', r.stderr, r.stderr)
+        self.assertIn('Not initialized', r.stderr, r.stderr)
 
-    def test_init_after_import_raises(self):
+    def test_init_after_import_works(self):
+        # The framework reads the settings when objects are created,
+        # so init() can be called after importing its modules
         r = self._run_python('import specula; from specula.base_time_obj import BaseTimeObj; '
-                             'specula.init(-1); BaseTimeObj()')
-        self.assertNotEqual(r.returncode, 0)
-        self.assertIn('called after importing', r.stderr, r.stderr)
+                             'specula.init(-1, precision=0); o = BaseTimeObj(); '
+                             'assert o.target_device_idx == -1 and o.precision == 0, vars(o)')
+        self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_init_before_import_works(self):
         r = self._run_python('import specula; specula.init(-1); '
@@ -242,16 +292,21 @@ class TestBaseValue(unittest.TestCase):
     # Same checks in-process, simulating the uninitialized globals with patch
 
     def test_uninitialized_raises_inprocess(self):
-        with patch('specula.global_precision', None):
-            with self.assertRaisesRegex(RuntimeError, 'SPECULA is not initialized'):
+        # The global state is kept in iteras, specula forwards it
+        with patch('iteras.global_precision', None):
+            with self.assertRaisesRegex(RuntimeError, 'Not initialized'):
                 BaseTimeObj()
 
-    def test_init_after_import_raises_inprocess(self):
-        with patch('specula.base_time_obj.global_precision', None):
-            with self.assertRaisesRegex(RuntimeError, 'called after importing'):
-                BaseTimeObj()
+    def test_settings_read_at_creation(self):
+        # Objects created after a new init() use its settings
+        with patch('iteras.global_precision', 0), patch('iteras.default_target_device_idx', -1):
+            obj = BaseTimeObj()
+        self.assertEqual((obj.precision, obj.target_device_idx), (0, -1))
+        with patch('iteras.global_precision', 1), patch('iteras.default_target_device_idx', -1):
+            obj = BaseTimeObj()
+        self.assertEqual((obj.precision, obj.target_device_idx), (1, -1))
 
     def test_gpu_without_cupy_raises(self):
-        with patch('specula.base_time_obj.cp', None):
+        with patch('iteras.cp', None):
             with self.assertRaisesRegex(RuntimeError, 'cupy is not available'):
                 BaseTimeObj(target_device_idx=0)

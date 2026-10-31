@@ -4,6 +4,7 @@ from astropy.io import fits
 from specula.base_data_obj import BaseDataObj
 from specula.lib.source_flux import phot_density_from_source_params
 from specula import ASEC2RAD
+from iteras.lib import storage
 
 degree2rad = np.pi / 180.
 
@@ -151,8 +152,8 @@ class Source(BaseDataObj):
         return res
 
     def save(self, filename, overwrite=False):
-        hdr = self.get_fits_header()
-        fits.writeto(filename, np.zeros(2), hdr, overwrite=overwrite)
+        storage.write_object(filename, self.get_fits_header(), {}, layout='placeholder',
+                             overwrite=overwrite)
 
     @staticmethod
     def from_header(hdr, target_device_idx=None):
@@ -170,5 +171,6 @@ class Source(BaseDataObj):
 
     @staticmethod
     def restore(filename, target_device_idx=None):
-        hdr = fits.getheader(filename)
+        with storage.read_object(filename) as f:
+            hdr = f.header
         return Source.from_header(hdr, target_device_idx=target_device_idx)

@@ -129,7 +129,7 @@ def run_science(args):
     settings_path = run_dir / 'psf_grid.yml'
     settings_path.write_text(yaml.safe_dump(settings, sort_keys=False))
     params['telemetry'] = {
-        'class': 'DataStore', 'store_dir': str(run_dir), 'create_tn': False,
+        'class': 'DataStore', 'store_dir': str(run_dir), 'create_tn': False, 'data_format': 'fits',
         'inputs': {'input_list': ['comm-integrator.out_comm']},
     }
     add_exposures(params, settings, {'J': ['psf_j'], 'K': ['psf_k']},

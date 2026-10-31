@@ -14,6 +14,7 @@ from specula.data_objects.source import Source
 from specula.data_objects.intmat import Intmat
 from specula.base_value import BaseValue
 from specula.connections import InputValue
+from iteras.lib import storage
 
 
 class ImCalibrator(BaseProcessingObj):
@@ -73,8 +74,7 @@ class ImCalibrator(BaseProcessingObj):
         self.overwrite = overwrite
 
         self.im_path = os.path.join(self.data_dir, self.im_tag)
-        if not self.im_path.endswith('.fits'):
-            self.im_path += '.fits'
+        self.im_path = storage.object_filename(self.im_path)
         if os.path.exists(self.im_path) and not self.overwrite:
             raise FileExistsError(f'IM file {self.im_path} already exists, please remove it')
 

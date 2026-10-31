@@ -1,14 +1,12 @@
 
 import numpy as np
-from astropy.io import fits
-from specula import cpuArray
 
 from specula.lib.modal_base_generator import compute_ifs_covmat
 from specula.lib.mmse_reconstructor import compute_mmse_reconstructor
-from specula.base_data_obj import BaseDataObj
-from specula.lib.fits_io import load_fits_array
+from iteras.data_objects.matrix import Matrix, matrix_array_name
 from specula.data_objects.recmat import Recmat
 from specula.data_objects.ifunc import IFunc
+from iteras.lib import storage
 
 
 class _ColsView:
@@ -35,10 +33,13 @@ class _RowsView:
     def __getitem__(self, key): return self.intmat_obj.intmat[key, :]
     def __setitem__(self, key, value): self.intmat_obj.intmat[key, :] = self.intmat_obj.to_xp(value)
 
-class Intmat(BaseDataObj):
+class Intmat(Matrix):
     """
     Interaction matrix data object.
     This class holds the interaction matrix (intmat) and related metadata for wavefront reconstruction.
+
+    It is a :class:`~iteras.data_objects.matrix.Matrix`, whose matrix is also
+    available as the ``intmat`` attribute.
     """
     def __init__(self,
                  intmat = None,
@@ -61,18 +62,25 @@ class Intmat(BaseDataObj):
 
         intmat_obj.modes[3:5] += 1
         """
-        super().__init__(target_device_idx=target_device_idx, precision=precision)
-        if intmat is not None:
-            self.intmat = self.to_xp(intmat, dtype=self.dtype)
-        else:
+        if intmat is None:
             if nmodes is None or nslopes is None:
                 raise ValueError('nmode sand nslopes must set if intmat is not passed')
-            self.intmat = self.xp.zeros((nslopes, nmodes), dtype=self.dtype)
+            intmat = np.zeros((nslopes, nmodes))
+        super().__init__(intmat, target_device_idx=target_device_idx, precision=precision)
         self.slope_mm = slope_mm
         self.slope_rms = slope_rms
         self.pupdata_tag = pupdata_tag
         self.subapdata_tag = subapdata_tag
         self.norm_factor = norm_factor
+
+    @property
+    def intmat(self):
+        '''The interaction matrix, same as ``matrix``'''
+        return self.matrix
+
+    @intmat.setter
+    def intmat(self, value):
+        self.matrix = value
 
     # Views created on demand: stored in an attribute, they would make a reference
     # cycle, and the intmat array would be freed only by the garbage collector.
@@ -83,21 +91,6 @@ class Intmat(BaseDataObj):
     @property
     def slopes(self):
         return _RowsView(self)
-
-    def get_value(self):
-        '''
-        Get the intmat as a numpy/cupy array
-        '''
-        return self.intmat
-
-    def set_value(self, v):
-        '''
-        Set new values for the intmat
-        Arrays are not reallocated
-        '''
-        assert v.shape == self.intmat.shape, \
-            f"Error: input array shape {v.shape} does not match intmat shape {self.intmat.shape}"
-        self.intmat[:]= self.to_xp(v)
 
     def set_nmodes(self, new_nmodes):
         old_nmodes = self.nmodes
@@ -135,31 +128,26 @@ class Intmat(BaseDataObj):
 
     @property
     def nmodes(self):
-        return self.intmat.shape[1]
+        return self.ncols
 
     @property
     def nslopes(self):
-        return self.intmat.shape[0]
+        return self.nrows
 
     def get_fits_header(self):
-        hdr = fits.Header()
-        hdr['VERSION'] = 1
+        hdr = super().get_fits_header()
         hdr['PUP_TAG'] = self.pupdata_tag
         hdr['SA_TAG'] = self.subapdata_tag
         hdr['NORMFACT'] = self.norm_factor
         return hdr
 
+    def _arrays_to_save(self):
+        return {'matrix': self.matrix, 'slopemm': self.slope_mm, 'sloperms': self.slope_rms}
+
     def save(self, filename, overwrite=True):
-        hdr = self.get_fits_header()
-        hdu = fits.PrimaryHDU(header=hdr)  # main HDU, empty, only header
-        hdul = fits.HDUList([hdu])
-        hdul.append(fits.ImageHDU(data=cpuArray(self.intmat), name='INTMAT'))
-        if self.slope_mm is not None:
-            hdul.append(fits.ImageHDU(data=cpuArray(self.slope_mm), name='SLOPEMM'))
-        if self.slope_rms is not None:
-            hdul.append(fits.ImageHDU(data=cpuArray(self.slope_rms), name='SLOPERMS'))
-        hdul.writeto(filename, overwrite=overwrite)
-        hdul.close()  # Force close for Windows
+        # FITS layout as before: the matrix in the first extension, after an empty primary HDU
+        storage.write_object(filename, self.get_fits_header(), self._arrays_to_save(),
+                             overwrite=overwrite)
 
     @staticmethod
     def from_header(hdr, target_device_idx=None):
@@ -167,19 +155,21 @@ class Intmat(BaseDataObj):
 
     @staticmethod
     def restore(filename, target_device_idx=None):
-        with fits.open(filename) as hdul:
-            hdr = hdul[0].header
+        with storage.read_object(filename) as f:
+            hdr = f.header
             norm_factor = float(hdr.get('NORMFACT', 0.0))
             pupdata_tag = hdr.get('PUP_TAG', '')
             subapdata_tag = hdr.get('SA_TAG', '')
-            # Reading additional fits extensions
-            if len(hdul) >= 4:
-                slope_mm = hdul[2].data.copy()
-                slope_rms = hdul[3].data.copy()
+            # Optional arrays, read only if both are present
+            if f.has('slopemm', 2) and f.has('sloperms', 3):
+                slope_mm = f.read('slopemm', 2)
+                slope_rms = f.read('sloperms', 3)
             else:
                 slope_mm = slope_rms = None
-        intmat = load_fits_array(filename, ext=1, target_device_idx=target_device_idx)
-        return Intmat(intmat, slope_mm, slope_rms, pupdata_tag, subapdata_tag, norm_factor, target_device_idx=target_device_idx)
+            intmat = f.load(matrix_array_name(f), 1, target_device_idx=target_device_idx)
+        return Intmat(intmat, slope_mm=slope_mm, slope_rms=slope_rms, pupdata_tag=pupdata_tag,
+                      subapdata_tag=subapdata_tag, norm_factor=norm_factor,
+                      target_device_idx=target_device_idx)
 
     def generate_rec(self, nmodes=None, cut_modes=0, w_vec=None, interactive=False):
         if nmodes is not None:

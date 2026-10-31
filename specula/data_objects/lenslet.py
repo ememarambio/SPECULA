@@ -1,9 +1,9 @@
 
-import numpy as np
 from astropy.io import fits
 
 from specula.lib.make_xy import make_xy
 from specula.base_data_obj import BaseDataObj
+from iteras.lib import storage
 
 
 class Lenslet(BaseDataObj):
@@ -72,8 +72,8 @@ class Lenslet(BaseDataObj):
         return hdr
 
     def save(self, filename, overwrite=False):
-        hdr = self.get_fits_header()
-        fits.writeto(filename, np.zeros(2), hdr, overwrite=overwrite)
+        storage.write_object(filename, self.get_fits_header(), {}, layout='placeholder',
+                             overwrite=overwrite)
 
     @staticmethod
     def from_header(hdr, target_device_idx=None):
@@ -84,5 +84,6 @@ class Lenslet(BaseDataObj):
 
     @staticmethod
     def restore(filename, target_device_idx=None):
-        hdr = fits.getheader(filename)
+        with storage.read_object(filename) as f:
+            hdr = f.header
         return Lenslet.from_header(hdr, target_device_idx=target_device_idx)

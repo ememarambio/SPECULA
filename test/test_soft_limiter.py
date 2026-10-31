@@ -7,6 +7,7 @@ specula.init(0)  # Default target device
 from specula import cpuArray
 from specula.base_value import BaseValue
 from specula.data_objects.recmat import Recmat
+from iteras.data_objects.matrix import Matrix
 from specula.processing_objects.soft_limiter import SoftLimiter
 from test.specula_testlib import cpu_and_gpu
 
@@ -43,12 +44,31 @@ class TestSoftLimiter(unittest.TestCase):
             recmat_list=recmat_list,
             target_device_idx=target_device_idx
         )
-        self.assertEqual(unwrapper.recmat.shape, (5, 10))
-        self.assertEqual(unwrapper.intmat.shape, (10, 5))
+        self.assertEqual(unwrapper.estimator.shape, (5, 10))
+        self.assertEqual(unwrapper.reprojector.shape, (10, 5))
 
         # Should raise an exception if the required matrices are missing
         with self.assertRaises(ValueError):
             SoftLimiter(recmat_list=[recmat_list[0]], target_device_idx=target_device_idx)
+
+        # matrix_list is the parameter name, recmat_list its previous name
+        limiter = SoftLimiter(matrix_list=recmat_list, target_device_idx=target_device_idx)
+        self.assertEqual(limiter.estimator.shape, (5, 10))
+        with self.assertRaisesRegex(ValueError, 'Only one'):
+            SoftLimiter(matrix_list=recmat_list, recmat_list=recmat_list,
+                        target_device_idx=target_device_idx)
+        with self.assertRaises(ValueError):
+            SoftLimiter(target_device_idx=target_device_idx)
+
+        # Shapes of the estimator and the reprojector must match
+        wrong = [recmat_list[0], Matrix(xp.zeros((10, 4), dtype=xp.float32),
+                                        target_device_idx=target_device_idx)]
+        with self.assertRaisesRegex(ValueError, 'Incompatible'):
+            SoftLimiter(matrix_list=wrong, target_device_idx=target_device_idx)
+        with self.assertRaisesRegex(ValueError, '2D'):
+            SoftLimiter(matrix_list=[recmat_list[0], Matrix(xp.zeros((2, 2, 2), dtype=xp.float32),
+                                                            target_device_idx=target_device_idx)],
+                        target_device_idx=target_device_idx)
 
     @cpu_and_gpu
     def test_trigger_math_correctness(self, target_device_idx, xp):

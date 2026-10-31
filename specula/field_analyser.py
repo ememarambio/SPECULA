@@ -2,7 +2,6 @@
 import numpy as np
 from pathlib import Path
 from typing import Dict, Optional, Tuple
-from astropy.io import fits
 
 from specula.base_replay_analyser import BaseReplayAnalyser
 from specula.lib.calc_psf import calc_psf_geometry
@@ -33,10 +32,11 @@ class FieldAnalyser(BaseReplayAnalyser):
                  end_time: Optional[float] = None,
                  display: bool = False,
                  log_level: Optional[str] = None,
-                 on_missing_downstream_consumers: str = 'error',):
+                 on_missing_downstream_consumers: str = 'error',
+                 data_format: Optional[str] = None):
 
         super().__init__(data_dir, tracking_number, start_time, end_time, display, log_level,
-                          on_missing_downstream_consumers)
+                          on_missing_downstream_consumers, data_format)
 
         self.polar_coordinates = np.atleast_2d(polar_coordinates)
         self.wavelength_nm = wavelength_nm
@@ -80,7 +80,7 @@ class FieldAnalyser(BaseReplayAnalyser):
             pixel_size_mas: PSF pixel size in milliarcseconds
 
         Returns:
-            Tuple of (psf_filename, sr_filename) without .fits extension
+            Tuple of (psf_filename, sr_filename) without extension
         """
         r, theta = source_dict['polar_coordinates']
         psf_filename = f"psf_r{r:.1f}t{theta:.1f}_pix{self.psf_pixel_size_mas:.2f}mas_wl{self.wavelength_nm:.0f}nm"
@@ -96,7 +96,7 @@ class FieldAnalyser(BaseReplayAnalyser):
             modal_params: Modal analysis parameters
 
         Returns:
-            Filename without .fits extension
+            Filename without extension
         """
         r, theta = source_dict['polar_coordinates']
         modal_filename = f"modal_r{r:.1f}t{theta:.1f}"
@@ -137,7 +137,7 @@ class FieldAnalyser(BaseReplayAnalyser):
             source_dict: source parameter dict
 
         Returns:
-            Filename without .fits extension
+            Filename without extension
         """
         r, theta = source_dict['polar_coordinates']
         cube_filename = f"cube_r{r:.1f}t{theta:.1f}_wl{self.wavelength_nm:.0f}nm"
@@ -185,7 +185,7 @@ class FieldAnalyser(BaseReplayAnalyser):
         replay_params['data_store_psf'] = {
             'class': 'DataStore',
             'store_dir': str(self.psf_output_dir),
-            'data_format': 'fits',
+            'data_format': self.data_format,
             'create_tn': False,  # Use existing directory structure
             'inputs': {
                 'input_list': psf_input_list
@@ -232,7 +232,7 @@ class FieldAnalyser(BaseReplayAnalyser):
         replay_params['data_store_modal'] = {
             'class': 'DataStore',
             'store_dir': str(self.modal_output_dir),
-            'data_format': 'fits',
+            'data_format': self.data_format,
             'create_tn': False,
             'inputs': {
                 'input_list': modal_input_list
@@ -263,7 +263,7 @@ class FieldAnalyser(BaseReplayAnalyser):
         replay_params['data_store_cube'] = {
             'class': 'DataStore',
             'store_dir': str(self.cube_output_dir),
-            'data_format': 'fits',
+            'data_format': self.data_format,
             'create_tn': False,  # Use existing directory structure
             'inputs': {
                 'input_list': cube_input_list
@@ -396,8 +396,8 @@ class FieldAnalyser(BaseReplayAnalyser):
         if not force_recompute:
             for source_dict in self.sources:
                 psf_filename, sr_filename = self._get_psf_filenames(source_dict)
-                psf_path = self.psf_output_dir / f"{psf_filename}.fits"
-                sr_path = self.psf_output_dir / f"{sr_filename}.fits"
+                psf_path = self._output_path(self.psf_output_dir, psf_filename)
+                sr_path = self._output_path(self.psf_output_dir, sr_filename)
 
                 if not psf_path.exists() or not sr_path.exists():
                     all_exist = False
@@ -442,7 +442,7 @@ class FieldAnalyser(BaseReplayAnalyser):
         if not force_recompute:
             for source_dict in self.sources:
                 modal_filename = self._get_modal_filename(source_dict, modal_params)
-                modal_path = self.modal_output_dir / f"{modal_filename}.fits"
+                modal_path = self._output_path(self.modal_output_dir, modal_filename)
                 if not modal_path.exists():
                     all_exist = False
                     break
@@ -471,7 +471,7 @@ class FieldAnalyser(BaseReplayAnalyser):
         if not force_recompute:
             for source_dict in self.sources:
                 cube_filename = self._get_cube_filename(source_dict)
-                cube_path = self.cube_output_dir / f"{cube_filename}.fits"
+                cube_path = self._output_path(self.cube_output_dir, cube_filename)
 
                 if not cube_path.exists():
                     all_exist = False
@@ -509,14 +509,12 @@ class FieldAnalyser(BaseReplayAnalyser):
             psf_filename, sr_filename = self._get_psf_filenames(source_dict)
 
             # Load PSF
-            psf_path = self.psf_output_dir / f"{psf_filename}.fits"
-            with fits.open(psf_path) as hdul:
-                results['psf_list'].append(hdul[0].data)   # pylint: disable=no-member
+            psf_path = self._output_path(self.psf_output_dir, psf_filename)
+            results['psf_list'].append(self._read_data_and_times(psf_path)[0])
 
             # Load SR
-            sr_path = self.psf_output_dir / f"{sr_filename}.fits"
-            with fits.open(sr_path) as hdul:
-                results['sr_list'].append(hdul[0].data)   # pylint: disable=no-member
+            sr_path = self._output_path(self.psf_output_dir, sr_filename)
+            results['sr_list'].append(self._read_data_and_times(sr_path)[0])
 
         return results
 
@@ -534,20 +532,19 @@ class FieldAnalyser(BaseReplayAnalyser):
 
         for source_dict in self.sources:
             modal_filename = self._get_modal_filename(source_dict, modal_params)
-            modal_path = self.modal_output_dir / f"{modal_filename}.fits"
+            modal_path = self._output_path(self.modal_output_dir, modal_filename)
 
-            with fits.open(modal_path) as hdul:
-                modal_coeffs = hdul[0].data     # pylint: disable=no-member
-                results['modal_coeffs'].append(modal_coeffs)
+            modal_coeffs = self._read_data_and_times(modal_path)[0]
+            results['modal_coeffs'].append(modal_coeffs)
 
-                # Calculate statistics from time series
-                if len(modal_coeffs) > 0:
-                    # Filter by time if needed (assuming first dimension is time)
-                    results['residual_average'].append(np.mean(modal_coeffs, axis=0))
-                    results['residual_variance'].append(np.var(modal_coeffs, axis=0))
-                else:
-                    results['residual_average'].append(np.zeros(modal_coeffs.shape[1]))
-                    results['residual_variance'].append(np.zeros(modal_coeffs.shape[1]))
+            # Calculate statistics from time series
+            if len(modal_coeffs) > 0:
+                # Filter by time if needed (assuming first dimension is time)
+                results['residual_average'].append(np.mean(modal_coeffs, axis=0))
+                results['residual_variance'].append(np.var(modal_coeffs, axis=0))
+            else:
+                results['residual_average'].append(np.zeros(modal_coeffs.shape[1]))
+                results['residual_variance'].append(np.zeros(modal_coeffs.shape[1]))
 
         return results
 
@@ -563,9 +560,9 @@ class FieldAnalyser(BaseReplayAnalyser):
 
         for source_dict in self.sources:
             cube_filename = self._get_cube_filename(source_dict)
-            cube_path = self.cube_output_dir / f"{cube_filename}.fits"
+            cube_path = self._output_path(self.cube_output_dir, cube_filename)
 
-            data, times = self._read_fits_primary_and_times(cube_path)
+            data, times = self._read_data_and_times(cube_path)
             results['phase_cubes'].append(data)
             if results['times'] is None and times is not None:
                 results['times'] = times
