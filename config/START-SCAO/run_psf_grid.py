@@ -123,6 +123,8 @@ def add_direct_dataset(params, settings, run_dir, shard_size=4, max_shard_bytes=
     validate_science_graph(params)
     points = field_grid(settings)
     sources, names = [], {'J': ['psf_j'], 'K': ['psf_k']}
+    for name in ('psf_j', 'psf_k'):
+        params[name]['class'] = 'DatasetPSF'
     for i, (x, y) in enumerate(points):
         source = f'field_{i}'
         sources.append(source)
@@ -135,7 +137,7 @@ def add_direct_dataset(params, settings, run_dir, shard_size=4, max_shard_bytes=
             name = f'psf_{band}_{i}'
             names[band].append(name)
             params[name] = {
-                'class': 'PSF', 'simul_params_ref': 'main', 'wavelengthInNm': wavelength,
+                'class': 'DatasetPSF', 'simul_params_ref': 'main', 'wavelengthInNm': wavelength,
                 'nd': settings['nd'], 'start_time': settings['settling_time'],
                 'compute_profile_metrics': False,
                 'inputs': {'in_ef': f'prop.out_{source}_ef'},
