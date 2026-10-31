@@ -23,6 +23,7 @@ from specula.data_objects.simul_params import SimulParams
 from specula.lib.calc_psf import calc_psf
 from specula.processing_objects.ccd import CCD
 from specula.processing_objects.scao_telemetry_store import ScaoTelemetryStore
+from specula.processing_objects.scao_webdataset_store import ScaoWebdatasetStore
 from specula.simul import Simul
 
 
@@ -272,3 +273,196 @@ def test_export_rejects_misaligned_data_without_publishing(physical_run, tmp_pat
         dataset.export_dataset([run], tmp_path / 'shards', shard_size=1)
     assert not (tmp_path / 'shards').exists()
     assert not list(tmp_path.glob('.shards.partial-*'))
+
+
+@pytest.fixture(scope='module')
+def direct_run(physical_run, tmp_path_factory):
+    pytest.importorskip('webdataset')
+    root = tmp_path_factory.mktemp('scao_direct')
+    params = yaml.safe_load((physical_run / 'science.yml').read_text())
+    settings = yaml.safe_load((physical_run / 'psf_grid.yml').read_text())
+    params = {k: v for k, v in params.items() if v['class'] not in
+              ('ScaoTelemetryStore', 'DataStore', 'WindowedIntegration', 'PsfExposureStore')}
+    workflow.add_direct_dataset(params, settings, root, shard_size=1)
+    params['dataset']['inputs']['in_commands'] = 'integrator.output'
+    assert not any(p['class'] in ('DataStore', 'ScaoTelemetryStore', 'PsfExposureStore') for p in params.values())
+    order, _ = Simul('dummy.yml').build_trigger_order(params)
+    assert order.index('integrator') < order.index('dataset') < order.index('dm')
+    assert order.index('exposure_K_short_4') < order.index('dataset')
+    workflow.run_params(params, root / 'science.yml')
+    return root
+
+
+def read_shards(root):
+    import webdataset as wds
+    manifest = json.loads((root / 'dataset.json').read_text())
+    urls = [str(root / shard['file']) for shard in manifest['shards']]
+    return manifest, list(wds.WebDataset(urls, shardshuffle=False).decode())
+
+
+def test_direct_samples_match_original_telemetry_and_all_field_targets(direct_run, physical_run):
+    manifest, samples = read_shards(direct_run / 'dataset')
+    assert manifest['samples'] == 2
+    assert [s['samples'] for s in manifest['shards']] == [1, 1]
+    assert not list(direct_run.rglob('*.fits'))
+    assert not list(direct_run.rglob('*.npz'))
+    assert not list(direct_run.rglob('*.partial'))
+    assert not (direct_run / 'replay_params.yml').exists()
+    reference = dataset.RunDataset(physical_run)
+    for index, sample in enumerate(samples):
+        with np.load(reference.telemetry / f'window_{index:06d}.npz') as original:
+            for name in original.files:
+                np.testing.assert_array_equal(sample[f'{name}.npy'], original[name])
+        for band in ('J', 'K'):
+            expected, _ = reference._psfs(index, band)
+            np.testing.assert_allclose(sample[f'psf_{band.lower()}.npy'], expected, rtol=2e-6, atol=2e-8)
+        np.testing.assert_array_equal(sample['field_ids.npy'], [-1, 0, 1, 2, 3])
+        np.testing.assert_array_equal(sample['field_xy_arcsec.npy'], reference.positions)
+        assert sample['meta.json']['first_simulation_step'] == 2 + index * 100
+        assert sample['meta.json']['n_frames'] == 100
+        assert sample['meta.json']['on_axis_index'] == 0
+    long_manifest, long_samples = read_shards(direct_run / 'dataset/long_exposures')
+    assert long_manifest['samples'] == len(long_samples) == 1
+    sample = long_samples[0]
+    assert sample['meta.json']['n_frames'] == 200
+    assert sample['meta.json']['sample_kind'] == 'long_psf'
+    assert 'shwfs_frames.npy' not in sample
+    for directory, ids in reference.groups:
+        for band in ('J', 'K'):
+            expected = fits.getdata(directory / band / 'long/exposure_000000.fits')
+            np.testing.assert_allclose(sample[f'psf_{band.lower()}.npy'][ids + 1], expected, rtol=2e-6, atol=2e-8)
+
+
+def direct_inputs(path, device=-1):
+    params = SimulParams(time_step=.002, total_time=.404, pixel_pupil=4, pixel_pitch=.1)
+    store = ScaoWebdatasetStore(params, str(path), grid_size=2, field_width_arcsec=21.,
+                                bands_nm={'J': 1250., 'K': 2200.}, stamp_size=4,
+                                start_time=.004, long_frames=200,
+                                shard_size=1, target_device_idx=device)
+    xp = store.xp
+    commands = BaseValue(value=xp.zeros(2, dtype=xp.float32), target_device_idx=device)
+    applied = BaseValue(value=xp.zeros(2, dtype=xp.float32), target_device_idx=device)
+    pixels = Pixels(3, 2, target_device_idx=device, precision=1)
+    ef = ElectricField(4, 4, .1, target_device_idx=device, precision=1)
+    ef.A[:] = 1
+    for name, obj in zip(('in_commands', 'in_applied_commands', 'in_pixels', 'in_ef'),
+                          (commands, applied, pixels, ef)):
+        store.inputs[name].set(obj)
+    psfs = {}
+    for label in ('short', 'long'):
+        for band in ('J', 'K'):
+            key = f'in_{label}_{band}'
+            psfs[key] = [BaseValue(value=xp.ones((8, 8), dtype=xp.float32) / 64,
+                                   target_device_idx=device) for _ in range(5)]
+            store.inputs[key].set(psfs[key])
+    return store, commands, applied, pixels, ef, psfs
+
+
+@pytest.mark.parametrize('device', [-1, pytest.param(0, marks=pytest.mark.skipif(
+    specula.cp is None, reason='CuPy/GPU unavailable'))])
+def test_direct_writer_only_transfers_completed_psf_stamps(tmp_path, device):
+    pytest.importorskip('webdataset')
+    import specula.processing_objects.scao_webdataset_store as direct_module
+    *objects, psfs = direct_inputs(tmp_path / 'dataset', device)
+    store = objects[0]
+    with patch.object(BaseValue, 'copyTo', side_effect=AssertionError('Full input clone')), \
+         patch.object(BaseValue, 'transferDataTo', side_effect=AssertionError('Full input transfer')), \
+         patch.object(direct_module, 'cpuArray', wraps=specula.cpuArray) as transfer:
+        store.setup()
+        for step in range(202):
+            if step in (101, 201):
+                for key, values in psfs.items():
+                    if 'short' in key or step == 201:
+                        for value in values:
+                            value.generation_time = step * store.step
+            step_capture(*objects, step)
+            assert transfer.call_count == (0 if step < 101 else 10 if step < 201 else 30)
+        assert all(call.args[0].shape == (4, 4) for call in transfer.call_args_list)
+        store.finalize()
+        assert transfer.call_count == 30
+    _, samples = read_shards(store.store_dir)
+    assert np.allclose(samples[0]['psf_j.npy'].sum(axis=(1, 2)), .25)  # No crop renormalization.
+
+
+@pytest.mark.parametrize('problem', ['stale_psf', 'partial', 'write_failure'])
+def test_direct_failure_does_not_publish_dataset_or_open_shard(tmp_path, problem):
+    pytest.importorskip('webdataset')
+    *objects, psfs = direct_inputs(tmp_path / 'dataset')
+    store = objects[0]
+    store.setup()
+    try:
+        for step in range(101):
+            step_capture(*objects, step)
+        if problem == 'partial':
+            with pytest.raises(ValueError, match='Incomplete telemetry'):
+                store.finalize()
+        elif problem == 'stale_psf':
+            with pytest.raises(ValueError, match='PSFs do not match'):
+                step_capture(*objects, 101)
+        else:
+            for key, values in psfs.items():
+                if 'short' in key:
+                    for value in values:
+                        value.generation_time = 101 * store.step
+            with patch.object(store.streams['short'].writer, 'write', side_effect=OSError('disk full')):
+                with pytest.raises(OSError, match='disk full'):
+                    step_capture(*objects, 101)
+    finally:
+        store.abort()
+    assert all(stream.closed for stream in store.streams.values())
+    assert not list(store.store_dir.rglob('dataset.json'))
+    assert not list(store.store_dir.rglob('*.tar'))
+    assert list(store.store_dir.rglob('*.partial'))
+
+
+@pytest.mark.parametrize('interrupt', [False, True])
+def test_dataset_run_entrypoint_and_interruption_cleanup(physical_run, tmp_path, monkeypatch, interrupt):
+    pytest.importorskip('webdataset')
+    params = yaml.safe_load((physical_run / 'science.yml').read_text())
+    settings = yaml.safe_load((physical_run / 'psf_grid.yml').read_text())
+    params = {k: v for k, v in params.items() if v['class'] not in
+              ('ScaoTelemetryStore', 'DataStore', 'WindowedIntegration', 'PsfExposureStore')}
+    # Use the real controller output name expected by the command-line graph.
+    params['drive'] = params['integrator']
+    params['integrator'] = {'class': 'Integrator', 'delay': 2, 'int_gain': [.3],
+                            'n_modes': [2], 'inputs': {'delta_comm': 'drive.output'}}
+    params['dm']['inputs']['in_command'] = 'integrator.out_comm'
+    settings.pop('batch_size')  # Direct mode has no dependency on field batching.
+    config = tmp_path / 'config'
+    config.mkdir()
+    (config / 'params_truthwfs_scao.yml').write_text(yaml.safe_dump(params))
+    (config / 'psf_grid.yml').write_text(yaml.safe_dump(settings))
+    monkeypatch.setattr(workflow, 'HERE', config)
+    run = tmp_path / 'run'
+    args = argparse.Namespace(run_dir=run, settings=config / 'psf_grid.yml', science_time=None,
+                              displays=False, dataset=True, shard_size=1, max_shard_gib=1.)
+    captured = []
+    if interrupt:
+        trigger = ScaoWebdatasetStore.trigger_code
+
+        def fail_during_simulation(store):
+            if store.current_time >= store.start + store.step:
+                captured.append(store)
+                raise RuntimeError('simulated interruption')
+            trigger(store)
+
+        monkeypatch.setattr(ScaoWebdatasetStore, 'trigger_code', fail_during_simulation)
+        with pytest.raises(RuntimeError, match='simulated interruption'):
+            workflow.run_science(args)
+        assert captured and all(stream.closed for stream in captured[0].streams.values())
+        assert not (run / 'DATASET_COMPLETE').exists()
+        assert not list(run.rglob('dataset.json'))
+        assert list(run.rglob('*.partial'))
+    else:
+        workflow.run_science(args)
+        assert (run / 'DATASET_COMPLETE').exists()
+        manifest, samples = read_shards(run / 'dataset')
+        assert manifest['samples'] == len(samples) == 2
+        for previous, current in zip(samples, samples[1:]):
+            np.testing.assert_array_equal(current['dm_commands.npy'][0], previous['controller_commands.npy'][-1])
+        with pytest.raises(FileExistsError):
+            workflow.run_science(args)
+        with pytest.raises(ValueError, match='replay is unnecessary'):
+            workflow.replay_field(argparse.Namespace(run_dir=run))
+    assert not list(run.rglob('*.fits'))
+    assert not list(run.rglob('*.npz'))

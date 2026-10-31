@@ -5,7 +5,7 @@ short_frames: 100
 long_exposure: 10.0
 field_width_arcsec: 21.0
 grid_size: 32
-batch_size: 16
+batch_size: 16  # FITS replay only; --dataset computes the full field together
 nd: 2.0
 stamp_size: 128  # Central crop in pixels; retain the native J/K pixel scales
 # Monochromatic representatives of J and K (no bandpass integration).

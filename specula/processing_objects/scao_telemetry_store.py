@@ -72,6 +72,11 @@ class ScaoTelemetryStore(BaseProcessingObj):
     def setup(self):
         super().setup()
         self.store_dir.mkdir(parents=True, exist_ok=False)
+        self._setup_telemetry()
+        (self.store_dir / 'metadata.json').write_text(json.dumps(self.metadata, indent=2) + '\n')
+
+    def _setup_telemetry(self):
+        """Initialize window metadata independently of the output format."""
         self.metadata = {
             'schema_version': 1, 'run_id': uuid.uuid4().hex,
             'n_frames': self.n_frames, 'start_tick': self.start,
@@ -84,7 +89,6 @@ class ScaoTelemetryStore(BaseProcessingObj):
             'controller_commands': 'emitted at the same simulation step',
             'applied_command_delay_steps': 1,
         }
-        (self.store_dir / 'metadata.json').write_text(json.dumps(self.metadata, indent=2) + '\n')
 
     def trigger_code(self):
         if self.current_time < self.start:
@@ -129,18 +133,24 @@ class ScaoTelemetryStore(BaseProcessingObj):
         self.frame += 1
         self.next_time += self.step
         if self.frame == self.n_frames:
-            path = self.store_dir / f'window_{self.windows:06d}.npz'
-            temporary = path.with_suffix('.npz.partial')
-            if path.exists():
-                raise FileExistsError(path)
-            with temporary.open('xb') as stream:
-                np.savez(stream, **self.buffers, pupil=self.pupil)
-            temporary.rename(path)
+            self._write_window()
             self.windows += 1
             self.frame = 0
 
-    def finalize(self):
+    def _write_window(self):
+        path = self.store_dir / f'window_{self.windows:06d}.npz'
+        temporary = path.with_suffix('.npz.partial')
+        if path.exists():
+            raise FileExistsError(path)
+        with temporary.open('xb') as stream:
+            np.savez(stream, **self.buffers, pupil=self.pupil)
+        temporary.rename(path)
+
+    def _validate_complete(self):
         if self.next_time != self.end or self.frame:
             raise ValueError('Incomplete telemetry: not all requested simulation steps were captured')
+
+    def finalize(self):
+        self._validate_complete()
         (self.store_dir / 'COMPLETE.json').write_text(
             json.dumps({'run_id': self.metadata['run_id'], 'windows': self.windows}) + '\n')

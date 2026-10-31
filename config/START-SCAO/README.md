@@ -1,16 +1,18 @@
 # START-SCAO: J/K PSF exposures across a 21 arcsecond square
 
-`run_psf_grid.py` runs the AO loop once and saves every DM command. It then
-replays that same atmospheric and DM history in small batches of field points,
-computing both J and K PSFs for each point. The WFS/controller is only run in
-the science stage. Run the commands below from the repository root with a
-Python environment containing SPECULA's dependencies.
+`run_psf_grid.py run ... --dataset` runs the AO loop and the full science field
+together, writing synchronized training samples directly to WebDataset. See
+[WebDataset training samples](#webdataset-training-samples) below for this
+single-simulation workflow. Run commands from the repository root with a Python
+environment containing SPECULA's dependencies.
+
+The existing FITS workflow is also available: without `--dataset`, the science
+run saves commands and on-axis exposures, followed by a separate field replay.
 
 Upstream now bundles the `iteras` simulation engine and adds `h5py` to its
 requirements. Update the active environment after pulling with
 `python -m pip install -e .` from the repository root. This workflow explicitly
-saves telemetry as FITS, including when an environment variable selects another
-default storage format.
+uses explicit output formats regardless of the ITERAS default storage format.
 
 ## Calibration
 
@@ -35,7 +37,7 @@ reconstructors. Previously generated SH calibration products must be replaced.
 The empirical basis does not need to be reimported if it is already present.
 Displays are in `display.yml`, separate from these benches.
 
-## Science run and field replay
+## FITS science run and field replay
 
 ```sh
 python config/START-SCAO/run_psf_grid.py run output/START-SCAO/run01
@@ -171,23 +173,43 @@ Benchmark a small batch before processing all 1,024 points.
 ## WebDataset training samples
 
 Install the optional [WebDataset](https://github.com/webdataset/webdataset)
-dependency, capture training telemetry in a **new** science run, finish all
-field batches, then export:
+dependency, then run the full dataset simulation:
 
 ```sh
 python -m pip install -e '.[dataset]'
 python config/START-SCAO/run_psf_grid.py --target 0 --precision 1 run output/START-SCAO/train01 --dataset
-python config/START-SCAO/run_psf_grid.py --target 0 replay output/START-SCAO/train01
-python config/START-SCAO/generate_webdataset.py output/START-SCAO/train01 --out shards/train01
 ```
 
-Replay can use `--batch-size 1024` for the entire field at once, or the default
-16 to limit GPU memory. The exporter runs on the CPU and does not rerun the
-simulator. Old runs containing only `comm.fits` lack the recorded SHWFS noise
-realization and phase sequence; capture a new run with `--dataset` for these
-samples. The usual FITS telemetry and both exposure durations are still saved.
-Dataset targets use **only the independent 100-frame exposures**; the 10 s
-PSFs remain available separately as FITS.
+This computes **all 1,024 grid points plus on-axis in both J and K during the
+same AO simulation**. `batch_size` is ignored in dataset mode. Each completed
+100-step sample is written through `webdataset.ShardWriter` immediately;
+there is no replay, FITS/NPZ staging, command-history file, or export pass.
+The full PSF calculations and exposure buffers must fit on the selected device.
+Use float32 (`--precision 1`, the default) for the planned 40 GB A100 run.
+The full-size GPU run has not been profiled; validation uses small CPU fields.
+
+Training targets use the independent 100-frame exposures. The independent
+10-second J/K exposures are saved directly to a **second WebDataset stream**
+under `dataset/long_exposures/`. These samples contain `psf_j.npy`, `psf_k.npy`,
+field IDs/coordinates, and metadata, with the same field order and stamp sizes.
+They do not repeat telemetry; their metadata specifies the full exposure's
+`start_tick`, `end_tick`, and `n_frames` (5,000 by default).
+
+```text
+train01/
+  science.yml                 # Generated full simulation graph
+  psf_grid.yml                # Frozen settings
+  DATASET_COMPLETE            # Written only after the simulation succeeds
+  dataset/
+    params.yml                # Actual simulation parameters
+    metadata.json             # Run ID, precision, timing, units, field sampling
+    data-000000.tar            # Training samples, at most four per shard by default
+    data-000001.tar
+    dataset.json              # Training shard names and sample counts
+    long_exposures/
+      data-000000.tar          # Independent long J/K exposures
+      dataset.json            # Long-exposure shard names and sample counts
+```
 
 Each sample covers exactly 100 consecutive steps after settling: 0.2 s at
 500 Hz. With the defaults, the first sample covers steps 100–199, timestamps
@@ -231,25 +253,29 @@ J/K pixel scales and full-image normalization; cropping does not renormalize
 their retained flux. The 32×32 field alone is
 `psf_j[1:].reshape(32, 32, 128, 128)`; `psf_j[0]` is the on-axis stamp.
 
-Capture streams `dataset_telemetry/window_XXXXXX.npz` using one 100-frame host
-buffer (about 45 MiB in float32), plus the existing small command history for
-replay. Export assembles one complete sample at a time. At the defaults, a
-sample is approximately **173 MiB**, or **8.4 GiB per 10 s** of uncompressed
-shards, in addition to the source telemetry/FITS files. Float64 roughly doubles
-this. Shards contain at most four samples by default; `--shard-size` changes
-this limit and `--max-shard-gib` sets a size threshold (rotation happens between
-samples, so the threshold can be exceeded by one sample).
+Capture uses one 100-frame host buffer (about 45 MiB in float32). At each
+completed exposure, the writer transfers only the central PSF stamps from the
+simulation device and serializes one complete sample. Readiness checks do not
+copy full PSF arrays. GPU PSF accumulators still use the full 512×512 images.
+At the defaults, a training sample is approximately **173 MiB**: **8.45 GiB per
+10 s**, plus about **128 MiB** for the corresponding long-exposure PSFs. There
+is no duplicate intermediate dataset. Float64 roughly doubles these sizes.
+Shards contain at most four samples by default; pass `--shard-size` and
+`--max-shard-gib` to `run` to adjust rotation. The same limits apply independently
+to both streams. Rotation happens between samples, so the byte threshold can
+be exceeded by one sample.
 
-The exporter requires complete telemetry and complete, non-overlapping field
-batches. It checks integer timestamps, controller values against `comm.fits`,
-exposure bounds, field coordinates, wavelengths, crop geometry, and precision
-across batches. It refuses existing destinations and assembles into a temporary
-directory, publishing the requested directory only after all samples succeed.
-`dataset.json` lists shards and sample counts; `runs/<run_id>/` holds the source
-configuration and telemetry metadata. No calibration FITS files are packaged.
-Multiple complete runs can be passed before `--out`; duplicate run IDs are
-rejected. For train/validation splits, keep entire independent runs together
-to avoid sharing adjacent, temporally correlated windows across splits.
+The writer verifies current-step telemetry timestamps, the applied DM update,
+and synchronized PSF completion at each exposure boundary. Incomplete windows
+are never emitted. Shards are written as `.tar.partial` until closed; already
+closed shards remain available after an interruption. `dataset.json` is written
+only after all requested windows have been captured and both streams closed.
+An interrupted run has no `DATASET_COMPLETE` marker. Restart in a new output
+directory; automatic resume is not implemented. Existing directories are
+refused. No calibration FITS files are packaged.
+
+For train/validation splits, keep entire independent runs together to avoid
+sharing adjacent, temporally correlated windows across splits.
 The base configuration uses fixed random seeds: repeating it unchanged gives
 the same simulation, even with a new run ID. Vary the atmosphere and detector
 seeds in the science configuration when generating independent realizations.
@@ -261,7 +287,7 @@ import json
 from pathlib import Path
 import webdataset as wds
 
-root = Path('shards/train01')
+root = Path('output/START-SCAO/train01/dataset')
 manifest = json.loads((root / 'dataset.json').read_text())
 urls = [str(root / shard['file']) for shard in manifest['shards']]
 samples = (
@@ -276,3 +302,7 @@ commands, frames, phase, psf_j, psf_k, pupil, metadata = next(iter(samples))
 NumPy members are serialized with pickle disabled. Keep shuffle buffers and
 training batches small initially: each sample already contains 100 frames
 and both complete PSF fields.
+
+`generate_webdataset.py` remains available to convert legacy runs that already
+contain `dataset_telemetry/*.npz` and completed FITS field replays. It is not
+part of the direct simulation workflow above.
