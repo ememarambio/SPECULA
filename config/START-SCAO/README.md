@@ -99,7 +99,15 @@ When the long duration is a multiple of 100 frames,
 `CompletedExposureIntegration` averages completed short exposures to produce the
 long target (50 short means for a 10-second exposure). Otherwise the long target
 uses its own stamp accumulator. Grouping averages can change floating-point
-rounding, but preserves the exposure interval and intensity mean. Only completed windows
+rounding, but preserves the exposure interval and intensity mean.
+
+The dataset workflow opts into `ScaoWebdatasetStore.device_buffering`: telemetry
+is snapshotted on the simulation device for 100 steps and copied to the host at
+the window boundary. Each PSF band is transferred as one field cube. Timestamp
+and shape checks still run every step; static-pupil and finite-value checks are
+resolved before publishing each window. This adds about 45 MiB of device
+telemetry storage with the default float32 shapes. The writer defaults to its
+original per-frame capture and per-field transfers when used independently. Only completed windows
 are written. For the default timing, short exposure 0 covers [0.2, 0.4), short
 exposure 1 covers [0.4, 0.6), and long exposure 0 covers [0.2, 10.2).
 

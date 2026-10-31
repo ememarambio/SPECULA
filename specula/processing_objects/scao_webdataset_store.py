@@ -81,7 +81,7 @@ class ScaoWebdatasetStore(BaseProcessingObj):
                  long_frames: int = 5000, start_time: float = .2,
                  shard_size: int = 4, max_shard_bytes: int = 1073741824,
                  dm_sign: int = -1, target_device_idx: int = None,
-                 psfs_are_stamps: bool = False):
+                 psfs_are_stamps: bool = False, device_buffering: bool = False):
         super().__init__(target_device_idx=target_device_idx)
         if set(bands_nm) != {'J', 'K'} or any(not np.isfinite(v) or v <= 0 for v in bands_nm.values()):
             raise ValueError('Expected positive J/K wavelengths')
@@ -102,6 +102,10 @@ class ScaoWebdatasetStore(BaseProcessingObj):
         self.frame = self.windows = 0
         self.buffers = None
         self.pupil = None
+        self.device_buffering = device_buffering
+        self._device_buffers = None
+        self._device_pupil = None
+        self._pupil_changed = None
         self.inputs['in_commands'] = InputValue(type=BaseValue)
         self.inputs['in_applied_commands'] = InputValue(type=BaseValue)
         self.inputs['in_pixels'] = InputValue(type=Pixels)
@@ -220,9 +224,7 @@ class ScaoWebdatasetStore(BaseProcessingObj):
             'applied_command_delay_steps': 1,
         }
 
-    def _capture_step(self):
-        if self.current_time < self.start:
-            return
+    def _validate_step(self):
         if self.current_time != self.next_time or self.current_time >= self.end:
             raise ValueError('Missing, repeated or out-of-order telemetry step')
         for name in ('in_commands', 'in_pixels', 'in_ef'):
@@ -233,6 +235,14 @@ class ScaoWebdatasetStore(BaseProcessingObj):
         expected = self.current_time - self.step if self.current_time else -1
         if applied.generation_time != expected:
             raise ValueError('Applied DM command must be read before the current DM update')
+
+    def _capture_step(self):
+        if self.device_buffering:
+            return self._capture_device_step()
+        if self.current_time < self.start:
+            return
+        self._validate_step()
+        applied = self.local_inputs['in_applied_commands']
 
         ef = self.local_inputs['in_ef']
         pupil = cpuArray(ef.A)
@@ -267,6 +277,59 @@ class ScaoWebdatasetStore(BaseProcessingObj):
             self.windows += 1
             self.frame = 0
 
+    def _capture_device_step(self):
+        """Snapshot matching frames on-device; transfer only complete windows.
+
+        Timestamp and shape checks run every step. Static-pupil and finite-value
+        checks are resolved before publishing each completed window, avoiding
+        host synchronization in the inner loop.
+        """
+        if self.current_time < self.start:
+            return
+        self._validate_step()
+        ef = self.local_inputs['in_ef']
+        applied = self.local_inputs['in_applied_commands']
+        values = {
+            'dm_commands': applied.value,
+            'controller_commands': self.local_inputs['in_commands'].value,
+            'shwfs_frames': self.local_inputs['in_pixels'].pixels,
+            'residual_phase': ef.phaseInNm,
+        }
+        if self._device_buffers is None:
+            self._device_buffers = {
+                name: self.xp.empty((self.n_frames, *value.shape), dtype=value.dtype)
+                for name, value in values.items()}
+            self._device_pupil = ef.A.copy()
+            self._pupil_changed = self.xp.asarray(False)
+            self.pupil = cpuArray(ef.A, force_copy=True)
+            self.buffers = {name: np.empty(self.n_frames, dtype=np.int64)
+                            for name in ('time_ticks', 'dm_command_time_ticks')}
+        if ef.A.shape != self._device_pupil.shape:
+            raise ValueError('Dataset capture requires a static on-axis pupil')
+        self._pupil_changed |= self.xp.any(ef.A != self._device_pupil)
+        for name, value in values.items():
+            if value.shape != self._device_buffers[name].shape[1:]:
+                raise ValueError(f'Invalid or changing {name} array')
+            self._device_buffers[name][self.frame] = value
+        self.buffers['time_ticks'][self.frame] = self.current_time
+        self.buffers['dm_command_time_ticks'][self.frame] = applied.generation_time
+        self.frame += 1
+        self.next_time += self.step
+        if self.frame == self.n_frames:
+            if bool(cpuArray(self._pupil_changed)):
+                raise ValueError('Dataset capture requires a static on-axis pupil')
+            for name, value in self._device_buffers.items():
+                host = cpuArray(value, force_copy=True)
+                if name == 'residual_phase':
+                    host *= 2 * np.pi / self.wavelength
+                    host[:, self.pupil == 0] = 0
+                if not np.isfinite(host).all():
+                    raise ValueError(f'Invalid or changing {name} array')
+                self.buffers[name] = host
+            self._write_window()
+            self.windows += 1
+            self.frame = 0
+
     def _validate_complete(self):
         if self.next_time != self.end or self.frame:
             raise ValueError('Incomplete telemetry: not all requested simulation steps were captured')
@@ -277,7 +340,10 @@ class ScaoWebdatasetStore(BaseProcessingObj):
             psfs = self.local_inputs[f'in_{label}_{band}']
             if any(p.generation_time != self.current_time for p in psfs):
                 raise ValueError(f'{label} {band} PSFs do not match the completed telemetry exposure')
-            cube = np.stack([cpuArray(self._psf_stamp(p)) for p in psfs])
+            if self.device_buffering:
+                cube = cpuArray(self.xp.stack([self._psf_stamp(p) for p in psfs]))
+            else:
+                cube = np.stack([cpuArray(self._psf_stamp(p)) for p in psfs])
             if not np.isfinite(cube).all():
                 raise ValueError('PSF targets must be finite')
             members[f'psf_{band.lower()}.npy'] = npy_bytes(cube)

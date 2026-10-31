@@ -162,6 +162,7 @@ def add_direct_dataset(params, settings, run_dir, shard_size=4, max_shard_bytes=
         'bands_nm': settings['bands_nm'], 'nd': settings['nd'],
         'stamp_size': settings.get('stamp_size'), 'n_frames': settings['short_frames'],
         'psfs_are_stamps': True,
+        'device_buffering': True,
         'long_frames': frame_count(settings['long_exposure'], params['main']['time_step'], 'long_exposure'),
         'start_time': settings['settling_time'], 'dm_sign': params['dm'].get('sign', -1),
         'shard_size': shard_size, 'max_shard_bytes': max_shard_bytes,

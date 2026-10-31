@@ -179,3 +179,89 @@ def test_nondivisible_long_exposures_keep_direct_accumulation(tmp_path):
     workflow.add_direct_dataset(params, settings, tmp_path)
     assert params['exposure_J_long_0']['class'] == 'PsfStampIntegration'
     assert params['exposure_J_long_0']['inputs']['input'] == 'psf_j.out_psf'
+
+
+@pytest.mark.parametrize('device', DEVICES)
+def test_device_window_capture_matches_legacy_and_consolidates_transfers(tmp_path, device):
+    from unittest.mock import patch
+    import specula.processing_objects.scao_webdataset_store as module
+    from test.test_start_scao_dataset import direct_inputs, step_capture, read_shards
+    legacy = direct_inputs(tmp_path / 'legacy', device)
+    buffered = direct_inputs(tmp_path / 'buffered', device)
+    buffered[0].device_buffering = True
+    for items in (legacy, buffered):
+        items[0].setup()
+    transfers = []
+    try:
+        for step in range(202):
+            for items in (legacy, buffered):
+                *objects, psfs = items
+                store = objects[0]
+                if step in (101, 201):
+                    for key, values in psfs.items():
+                        if 'short' in key or step == 201:
+                            for value in values:
+                                value.generation_time = step * store.step
+                with patch.object(module, 'cpuArray', wraps=specula.cpuArray) as to_cpu:
+                    step_capture(*objects, step)
+                    if items is buffered:
+                        transfers.extend(call.args[0].shape for call in to_cpu.call_args_list)
+            if step == 100:
+                assert transfers == [(4, 4)]  # Static pupil only, no per-step telemetry copies.
+        for items in (legacy, buffered):
+            items[0].finalize()
+    finally:
+        for items in (legacy, buffered):
+            items[0].abort()
+    assert transfers.count((5, 4, 4)) == 6  # Two bands, two short exposures, one long.
+    assert transfers.count((100, 4, 4)) == 2  # Phase, once per short window.
+    assert transfers.count((100, 2, 3)) == 2  # Detector, once per short window.
+    for suffix in ('', 'long_exposures'):
+        _, expected = read_shards(legacy[0].store_dir / suffix)
+        _, actual = read_shards(buffered[0].store_dir / suffix)
+        for a, b in zip(actual, expected):
+            for key in a:
+                if key.endswith('.npy'):
+                    np.testing.assert_allclose(a[key], b[key])
+
+
+@pytest.mark.parametrize('problem', ['pupil', 'nonfinite', 'stale_frame'])
+def test_device_capture_validates_before_publishing(tmp_path, problem):
+    from test.test_start_scao_dataset import direct_inputs, step_capture
+    *objects, psfs = direct_inputs(tmp_path / 'dataset')
+    store, commands, applied, pixels, ef = objects
+    store.device_buffering = True
+    store.setup()
+    try:
+        step_capture(*objects, 2)
+        if problem == 'stale_frame':
+            commands.generation_time = ef.generation_time = 3 * store.step
+            applied.generation_time = 2 * store.step
+            store.check_ready(3 * store.step)
+            with pytest.raises(ValueError, match='current simulation step'):
+                store.trigger()
+        else:
+            for step in range(3, 101):
+                if step == 20:
+                    if problem == 'pupil':
+                        ef.A[0, 0] = 0
+                    else:
+                        commands.value[:] = np.nan
+                if problem == 'nonfinite' and step == 20:
+                    # step_capture replaces commands, so inject NaN in the pixels
+                    # after setting the normal source values.
+                    step_capture(*objects, step)
+                    store._device_buffers['shwfs_frames'][store.frame - 1, 0, 0] = np.nan
+                else:
+                    step_capture(*objects, step)
+                if problem == 'pupil' and step == 20:
+                    ef.A[0, 0] = 1  # Detect even a transient change.
+            for values in psfs.values():
+                for value in values:
+                    value.generation_time = 101 * store.step
+            with pytest.raises(ValueError, match='static on-axis pupil|Invalid or changing'):
+                step_capture(*objects, 101)
+    finally:
+        store.abort()
+    assert not list(store.store_dir.rglob('*.tar'))
+    assert not list(store.store_dir.rglob('dataset.json'))
