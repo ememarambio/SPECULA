@@ -5,6 +5,7 @@
 
 ### New processing and data objects
 
+- Added opt-in START-SCAO training telemetry and WebDataset export: each sample pairs 100 synchronized applied DM commands, controller outputs, SHWFS detector frames, and on-axis residual phases with the matching J/K PSF grid and on-axis exposures. Capture streams bounded windows; export validates timing and complete field coverage.
 - Added `PsfExposureStore` to stream synchronized PSF exposure cubes to FITS with field coordinates and exposure timing. The START-SCAO workflow records full-cadence DM commands and replays a 32×32, 21 arcsecond square field in J/K with independent 100-frame and 10-second averages. At `nd: 2.0`, central 128×128 stamps retain the native pixel scale (2.08 arcseconds across in J, 3.67 in K), with no renormalization after cropping.
 
 ### Interface changes

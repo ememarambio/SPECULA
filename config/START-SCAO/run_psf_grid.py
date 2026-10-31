@@ -109,6 +109,33 @@ def run_params(params, path):
     Simul(str(path), log_level='warning').run()
 
 
+def add_dataset_capture(params, settings, run_dir):
+    """Observe the same delayed DM state as propagation, before DM updates."""
+    if settings['short_frames'] != 100:
+        raise ValueError('Dataset samples require short_frames: 100')
+    if params['detector_truth_sh']['dt'] != params['main']['time_step']:
+        raise ValueError('Dataset capture requires one SHWFS exposure per simulation step')
+    prop = params['prop']
+    if (prop.get('doFresnel', False) or prop.get('enable_chromatic_effect', False)
+            or 'dm.out_layer:-1' not in prop['inputs']['common_layer_list']):
+        raise ValueError('Dataset capture requires geometric propagation with dm.out_layer:-1')
+    for source in ('source_science_j', 'source_ngs'):
+        if params[source]['polar_coordinates'][0] != 0:
+            raise ValueError('Dataset capture requires on-axis science and SHWFS sources')
+    params['dataset_telemetry'] = {
+        'class': 'ScaoTelemetryStore', 'simul_params_ref': 'main',
+        'store_dir': str(Path(run_dir) / 'dataset_telemetry'),
+        'n_frames': 100, 'start_time': settings['settling_time'],
+        'phase_wavelength_nm': settings['bands_nm']['J'],
+        'inputs': {
+            'in_commands': 'integrator.out_comm',
+            'in_applied_commands': 'dm.out_clipped_command:-1',
+            'in_pixels': 'detector_truth_sh.out_pixels',
+            'in_ef': 'prop.out_source_science_j_ef',
+        },
+    }
+
+
 def run_science(args):
     params = yaml.safe_load((HERE / 'params_truthwfs_scao.yml').read_text())
     settings = yaml.safe_load(args.settings.read_text())
@@ -125,6 +152,8 @@ def run_science(args):
     if args.displays:
         params.update(yaml.safe_load((HERE / 'display.yml').read_text()))
     run_dir = args.run_dir.resolve()
+    if args.dataset:
+        add_dataset_capture(params, settings, run_dir)
     run_dir.mkdir(parents=True, exist_ok=False)
     settings_path = run_dir / 'psf_grid.yml'
     settings_path.write_text(yaml.safe_dump(settings, sort_keys=False))
@@ -232,6 +261,8 @@ def main():
     science.add_argument('--settings', type=Path, default=HERE / 'psf_grid.yml')
     science.add_argument('--science-time', type=float, help='Usable duration after settling [s]')
     science.add_argument('--displays', action='store_true')
+    science.add_argument('--dataset', action='store_true',
+                         help='Capture aligned 100-frame telemetry for WebDataset export')
     replay = sub.add_parser('replay', help='Compute J/K field exposures from a saved run')
     replay.add_argument('run_dir', type=Path)
     replay.add_argument('--batch-size', type=int)

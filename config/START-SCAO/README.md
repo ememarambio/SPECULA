@@ -167,3 +167,112 @@ Float64 doubles this. Cropping reduces saved image data by a factor of 16;
 the full FFTs and exposure accumulation still use 512 × 512 arrays. Batching
 limits memory, not disk usage or total FFT work.
 Benchmark a small batch before processing all 1,024 points.
+
+## WebDataset training samples
+
+Install the optional [WebDataset](https://github.com/webdataset/webdataset)
+dependency, capture training telemetry in a **new** science run, finish all
+field batches, then export:
+
+```sh
+python -m pip install -e '.[dataset]'
+python config/START-SCAO/run_psf_grid.py --target 0 --precision 1 run output/START-SCAO/train01 --dataset
+python config/START-SCAO/run_psf_grid.py --target 0 replay output/START-SCAO/train01
+python config/START-SCAO/generate_webdataset.py output/START-SCAO/train01 --out shards/train01
+```
+
+Replay can use `--batch-size 1024` for the entire field at once, or the default
+16 to limit GPU memory. The exporter runs on the CPU and does not rerun the
+simulator. Old runs containing only `comm.fits` lack the recorded SHWFS noise
+realization and phase sequence; capture a new run with `--dataset` for these
+samples. The usual FITS telemetry and both exposure durations are still saved.
+Dataset targets use **only the independent 100-frame exposures**; the 10 s
+PSFs remain available separately as FITS.
+
+Each sample covers exactly 100 consecutive steps after settling: 0.2 s at
+500 Hz. With the defaults, the first sample covers steps 100–199, timestamps
+0.200–0.398 s, and exposure interval **[0.200, 0.400) s**. The next starts at
+step 200. Ten seconds of science produces 50 samples, with no overlapping
+windows. `--dataset` requires `short_frames: 100` and one detector exposure
+per simulation step.
+
+Every tar sample has a unique `<run_id>_<window_index>` key and these members:
+
+| Member | Default shape | Meaning |
+| --- | --- | --- |
+| `dm_commands.npy` | `[100, 702]` | DM coefficients actually applied during each SHWFS exposure, before the DM's `sign: -1` |
+| `controller_commands.npy` | `[100, 702]` | Controller output emitted at those same simulation steps |
+| `shwfs_frames.npy` | `[100, 224, 224]` | Actual detector frames, including the configured noise, in native detector units |
+| `residual_phase.npy` | `[100, 256, 256]` | On-axis residual phase in unwrapped radians at 1,250 nm (the configured J wavelength) |
+| `pupil.npy` | `[256, 256]` | Static pupil amplitude; phase is zero outside it |
+| `psf_j.npy`, `psf_k.npy` | `[1025, 128, 128]` each | Mean PSFs over exactly these 100 steps; field index 0 is on-axis |
+| `field_ids.npy` | `[1025]` | `[-1, 0, ..., 1023]`: on-axis followed by row-major grid IDs |
+| `field_xy_arcsec.npy` | `[1025, 2]` | Matching `[x, y]` field coordinates |
+| `time_ticks.npy` | `[100]` | Shared exposure/phase/controller timestamps, in integer nanoseconds |
+| `dm_command_time_ticks.npy` | `[100]` | Generation timestamps of the DM commands applied in those exposures |
+| `meta.json` | JSON | Units, phase reference wavelength, timing, field order, J/K sampling, and run ID |
+
+The row at index `i` in the command, detector and phase arrays describes the
+**same physical simulation step**. Propagation uses `dm.out_layer:-1`, so the
+command actually shaping frame `t` is the DM output from `t − time_step`.
+The capture reads `dm.out_clipped_command:-1` before the DM updates, rather
+than pairing the frame with the newly emitted controller command. Both command
+forms are provided explicitly. The integrator's own delay is already included
+in its output; no extra shift is applied. If settling is zero, the first
+applied command is the initial zero command, with generation timestamp `-1`.
+
+Residual phase keeps piston and is not wrapped modulo 2π. Convert it to K-band
+radians with `phase_k = residual_phase * wavelength_j_nm / wavelength_k_nm`, or
+to wavelength-independent OPD in nm with
+`opd_nm = residual_phase * wavelength_j_nm / (2 * np.pi)`. The saved pupil must
+be used when computing a PSF from phase. The phase sequence is on-axis only;
+the PSF targets include the full off-axis field. Stamps retain their native
+J/K pixel scales and full-image normalization; cropping does not renormalize
+their retained flux. The 32×32 field alone is
+`psf_j[1:].reshape(32, 32, 128, 128)`; `psf_j[0]` is the on-axis stamp.
+
+Capture streams `dataset_telemetry/window_XXXXXX.npz` using one 100-frame host
+buffer (about 45 MiB in float32), plus the existing small command history for
+replay. Export assembles one complete sample at a time. At the defaults, a
+sample is approximately **173 MiB**, or **8.4 GiB per 10 s** of uncompressed
+shards, in addition to the source telemetry/FITS files. Float64 roughly doubles
+this. Shards contain at most four samples by default; `--shard-size` changes
+this limit and `--max-shard-gib` sets a size threshold (rotation happens between
+samples, so the threshold can be exceeded by one sample).
+
+The exporter requires complete telemetry and complete, non-overlapping field
+batches. It checks integer timestamps, controller values against `comm.fits`,
+exposure bounds, field coordinates, wavelengths, crop geometry, and precision
+across batches. It refuses existing destinations and assembles into a temporary
+directory, publishing the requested directory only after all samples succeed.
+`dataset.json` lists shards and sample counts; `runs/<run_id>/` holds the source
+configuration and telemetry metadata. No calibration FITS files are packaged.
+Multiple complete runs can be passed before `--out`; duplicate run IDs are
+rejected. For train/validation splits, keep entire independent runs together
+to avoid sharing adjacent, temporally correlated windows across splits.
+The base configuration uses fixed random seeds: repeating it unchanged gives
+the same simulation, even with a new run ID. Vary the atmosphere and detector
+seeds in the science configuration when generating independent realizations.
+
+Example loader (install PyTorch separately if needed for training):
+
+```python
+import json
+from pathlib import Path
+import webdataset as wds
+
+root = Path('shards/train01')
+manifest = json.loads((root / 'dataset.json').read_text())
+urls = [str(root / shard['file']) for shard in manifest['shards']]
+samples = (
+    wds.WebDataset(urls, shardshuffle=False)
+    .decode()
+    .to_tuple('dm_commands.npy', 'shwfs_frames.npy', 'residual_phase.npy',
+              'psf_j.npy', 'psf_k.npy', 'pupil.npy', 'meta.json')
+)
+commands, frames, phase, psf_j, psf_k, pupil, metadata = next(iter(samples))
+```
+
+NumPy members are serialized with pickle disabled. Keep shuffle buffers and
+training batches small initially: each sample already contains 100 frames
+and both complete PSF fields.
