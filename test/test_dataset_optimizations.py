@@ -136,3 +136,46 @@ def test_psf_only_mode_matches_full_psf_without_statistics_buffers(device):
         assert getattr(fast, name).value is None
     with pytest.raises(ValueError, match='Profile metrics require'):
         DatasetPSF(params, 1250., nd=2., compute_statistics=False, compute_profile_metrics=True)
+
+
+@pytest.mark.parametrize('device', DEVICES)
+def test_long_exposure_from_short_means_matches_direct_average(device):
+    from specula.base_value import BaseValue
+    from specula.processing_objects.completed_exposure_integration import CompletedExposureIntegration
+    xp = np if device < 0 else specula.cp
+    params = SimulParams(time_step=.002)
+    source = BaseValue(value=xp.zeros((3, 3)), target_device_idx=device)
+    obj = CompletedExposureIntegration(params, [3, 3], 100, 5000, start_time=.004,
+                                       target_device_idx=device)
+    obj.inputs['input'].set(source)
+    obj.setup()
+    rng = np.random.default_rng(13)
+    for window in range(2):
+        frames = rng.random((5000, 3, 3))
+        for exposure in range(50):
+            source.value[:] = xp.asarray(frames[exposure * 100:(exposure + 1) * 100].mean(axis=0))
+            tick = (2 + window * 5000 + (exposure + 1) * 100 - 1) * obj.loop_dt
+            source.generation_time = tick
+            obj.check_ready(tick)
+            obj.trigger()
+            obj.post_trigger()
+            if exposure < 49:
+                assert obj.output.generation_time < tick
+        np.testing.assert_allclose(cpuArray(obj.output.value), frames.mean(axis=0), rtol=2e-6)
+        assert obj.output.generation_time == tick
+    source.generation_time = tick + 200 * obj.loop_dt
+    obj.check_ready(source.generation_time)
+    with pytest.raises(ValueError, match='Missing or out-of-order'):
+        obj.trigger()
+    with pytest.raises(ValueError, match='positive multiple'):
+        CompletedExposureIntegration(params, [3, 3], 100, 250)
+
+
+def test_nondivisible_long_exposures_keep_direct_accumulation(tmp_path):
+    from test.test_start_scao_dataset import physical_config, workflow
+    params, settings = physical_config(tmp_path)
+    settings.update(science_time=.6, long_exposure=.3)
+    params['main']['total_time'] = .604
+    workflow.add_direct_dataset(params, settings, tmp_path)
+    assert params['exposure_J_long_0']['class'] == 'PsfStampIntegration'
+    assert params['exposure_J_long_0']['inputs']['input'] == 'psf_j.out_psf'

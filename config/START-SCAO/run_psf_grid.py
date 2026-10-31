@@ -83,6 +83,13 @@ def add_psf_windows(params, settings, psf_names):
                     'start_time': settings['settling_time'],
                     'inputs': {'input': f'{psf}.out_psf'},
                 }
+                if label == 'long' and long % short == 0:
+                    params[name] = {
+                        'class': 'CompletedExposureIntegration', 'simul_params_ref': 'main',
+                        'n_elem': [stamp, stamp], 'input_frames': short, 'output_frames': long,
+                        'start_time': settings['settling_time'],
+                        'inputs': {'input': f'exposure_{band}_short_{i}.output'},
+                    }
                 refs.append(f'{name}.output')
             windows[f'in_{label}_{band}'] = refs
     return windows

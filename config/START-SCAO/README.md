@@ -94,7 +94,12 @@ Dataset PSFs disable unused Strehl and cumulative statistics with
 provides all standard PSF outputs.
 The original `PSF` and `WindowedIntegration` classes remain available. The stamp
 accumulators reset after each completed window; their output timestamp updates
-only at an exposure boundary and their output retains the last completed image. Only completed windows
+only at an exposure boundary and their output retains the last completed image.
+When the long duration is a multiple of 100 frames,
+`CompletedExposureIntegration` averages completed short exposures to produce the
+long target (50 short means for a 10-second exposure). Otherwise the long target
+uses its own stamp accumulator. Grouping averages can change floating-point
+rounding, but preserves the exposure interval and intensity mean. Only completed windows
 are written. For the default timing, short exposure 0 covers [0.2, 0.4), short
 exposure 1 covers [0.4, 0.6), and long exposure 0 covers [0.2, 10.2).
 
