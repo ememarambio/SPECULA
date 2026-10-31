@@ -2,6 +2,7 @@
 
 import io
 import json
+import uuid
 from pathlib import Path
 
 import numpy as np
@@ -10,10 +11,11 @@ import yaml
 from specula import cpuArray
 from specula.base_processing_obj import BaseProcessingObj, InputDesc
 from specula.base_value import BaseValue
-from specula.connections import InputList
+from specula.connections import InputList, InputValue
+from specula.data_objects.electric_field import ElectricField
+from specula.data_objects.pixels import Pixels
 from specula.data_objects.simul_params import SimulParams
 from specula.lib.calc_psf import calc_psf_geometry
-from specula.processing_objects.scao_telemetry_store import ScaoTelemetryStore
 
 
 def npy_bytes(array):
@@ -62,7 +64,7 @@ class _ShardStream:
             self.writer.close()
 
 
-class ScaoWebdatasetStore(ScaoTelemetryStore):
+class ScaoWebdatasetStore(BaseProcessingObj):
     """One 100-step telemetry sample with full-field J/K PSFs, written in place.
 
     PSF lists come from independent WindowedIntegration objects using identical
@@ -79,8 +81,31 @@ class ScaoWebdatasetStore(ScaoTelemetryStore):
                  long_frames: int = 5000, start_time: float = .2,
                  shard_size: int = 4, max_shard_bytes: int = 1073741824,
                  dm_sign: int = -1, target_device_idx: int = None):
-        super().__init__(simul_params, store_dir, n_frames, start_time,
-                         phase_wavelength_nm=bands_nm['J'], target_device_idx=target_device_idx)
+        super().__init__(target_device_idx=target_device_idx)
+        if set(bands_nm) != {'J', 'K'} or any(not np.isfinite(v) or v <= 0 for v in bands_nm.values()):
+            raise ValueError('Expected positive J/K wavelengths')
+        phase_wavelength_nm = bands_nm['J']
+        self.step = self.seconds_to_t(simul_params.time_step)
+        self.start = self.seconds_to_t(start_time)
+        self.end = self.seconds_to_t(simul_params.total_time)
+        if (not isinstance(n_frames, int) or n_frames < 1 or self.step <= 0
+                or self.start < 0 or self.start % self.step
+                or self.end <= self.start or (self.end - self.start) % (n_frames * self.step)):
+            raise ValueError('Telemetry must contain complete windows aligned to time_step')
+        if not np.isfinite(phase_wavelength_nm) or phase_wavelength_nm <= 0:
+            raise ValueError('phase_wavelength_nm must be finite and positive')
+        self.n_frames = n_frames
+        self.wavelength = float(phase_wavelength_nm)
+        self.store_dir = Path(store_dir)
+        self.next_time = self.start
+        self.frame = self.windows = 0
+        self.buffers = None
+        self.pupil = None
+        self.inputs['in_commands'] = InputValue(type=BaseValue)
+        self.inputs['in_applied_commands'] = InputValue(type=BaseValue)
+        self.inputs['in_pixels'] = InputValue(type=Pixels)
+        self.inputs['in_ef'] = InputValue(type=ElectricField)
+
         if n_frames != 100:
             raise ValueError('WebDataset samples require exactly 100 frames')
         if (not isinstance(long_frames, int) or long_frames < 1
@@ -89,8 +114,6 @@ class ScaoWebdatasetStore(ScaoTelemetryStore):
         if (not isinstance(grid_size, int) or grid_size < 2
                 or not np.isfinite(field_width_arcsec) or field_width_arcsec <= 0):
             raise ValueError('Expected a finite square field and grid_size >= 2')
-        if set(bands_nm) != {'J', 'K'} or any(not np.isfinite(v) or v <= 0 for v in bands_nm.values()):
-            raise ValueError('Expected positive J/K wavelengths')
         if (not isinstance(shard_size, int) or shard_size < 1
                 or not isinstance(max_shard_bytes, int) or max_shard_bytes < 1):
             raise ValueError('Shard limits must be positive integers')
@@ -124,9 +147,18 @@ class ScaoWebdatasetStore(ScaoTelemetryStore):
 
     @classmethod
     def input_names(cls):
-        return {**super().input_names(), **{
-            f'in_{label}_{band}': InputDesc(BaseValue, f'Complete {label} {band} exposures, on-axis then grid')
-            for label in ('short', 'long') for band in ('J', 'K')}}
+        return {
+            'in_commands': InputDesc(BaseValue, 'Controller commands emitted at this step'),
+            'in_applied_commands': InputDesc(BaseValue, 'DM commands applied to this exposure (:-1)'),
+            'in_pixels': InputDesc(Pixels, 'Same-step SHWFS detector frame'),
+            'in_ef': InputDesc(ElectricField, 'Same-step on-axis residual electric field'),
+            **{f'in_{label}_{band}': InputDesc(BaseValue, f'Complete {label} {band} exposures, on-axis then grid')
+               for label in ('short', 'long') for band in ('J', 'K')},
+        }
+
+    @classmethod
+    def output_names(cls):
+        return {}
 
     def set_simulation_params(self, params):
         self.simulation_params = params
@@ -171,6 +203,72 @@ class ScaoWebdatasetStore(ScaoTelemetryStore):
             self.abort()
             raise
 
+    def _setup_telemetry(self):
+        """Initialize window metadata independently of the output format."""
+        self.metadata = {
+            'schema_version': 1, 'run_id': uuid.uuid4().hex,
+            'n_frames': self.n_frames, 'start_tick': self.start,
+            'end_tick': self.end, 'step_ticks': self.step,
+            'tick_seconds': self.t_to_seconds(1),
+            'phase_wavelength_nm': self.wavelength, 'phase_unit': 'rad',
+            'phase_direction_arcsec': [0., 0.],
+            'phase_convention': 'unwrapped; zero outside pupil; piston retained',
+            'dm_commands': 'applied during this exposure, before DM sign',
+            'controller_commands': 'emitted at the same simulation step',
+            'applied_command_delay_steps': 1,
+        }
+
+    def _capture_step(self):
+        if self.current_time < self.start:
+            return
+        if self.current_time != self.next_time or self.current_time >= self.end:
+            raise ValueError('Missing, repeated or out-of-order telemetry step')
+        for name in ('in_commands', 'in_pixels', 'in_ef'):
+            if self.local_inputs[name].generation_time != self.current_time:
+                raise ValueError(f'{name} is not from the current simulation step')
+        applied = self.local_inputs['in_applied_commands']
+        # At t=0 the untriggered DM represents its initial zero command.
+        expected = self.current_time - self.step if self.current_time else -1
+        if applied.generation_time != expected:
+            raise ValueError('Applied DM command must be read before the current DM update')
+
+        ef = self.local_inputs['in_ef']
+        pupil = cpuArray(ef.A)
+        if self.pupil is None:
+            self.pupil = pupil.copy()
+        elif not np.array_equal(pupil, self.pupil):
+            raise ValueError('Dataset capture requires a static on-axis pupil')
+        phase = cpuArray(ef.phaseInNm, force_copy=True)
+        phase *= 2 * np.pi / self.wavelength
+        phase[self.pupil == 0] = 0
+        values = {
+            'dm_commands': cpuArray(applied.value),
+            'controller_commands': cpuArray(self.local_inputs['in_commands'].value),
+            'shwfs_frames': cpuArray(self.local_inputs['in_pixels'].pixels),
+            'residual_phase': phase,
+        }
+        if self.buffers is None:
+            self.buffers = {k: np.empty((self.n_frames, *v.shape), dtype=v.dtype)
+                            for k, v in values.items()}
+            self.buffers['time_ticks'] = np.empty(self.n_frames, dtype=np.int64)
+            self.buffers['dm_command_time_ticks'] = np.empty(self.n_frames, dtype=np.int64)
+        for name, value in values.items():
+            if value.shape != self.buffers[name].shape[1:] or not np.isfinite(value).all():
+                raise ValueError(f'Invalid or changing {name} array')
+            self.buffers[name][self.frame] = value
+        self.buffers['time_ticks'][self.frame] = self.current_time
+        self.buffers['dm_command_time_ticks'][self.frame] = applied.generation_time
+        self.frame += 1
+        self.next_time += self.step
+        if self.frame == self.n_frames:
+            self._write_window()
+            self.windows += 1
+            self.frame = 0
+
+    def _validate_complete(self):
+        if self.next_time != self.end or self.frame:
+            raise ValueError('Incomplete telemetry: not all requested simulation steps were captured')
+
     def _psf_members(self, label):
         members = {}
         for band in ('J', 'K'):
@@ -201,7 +299,7 @@ class ScaoWebdatasetStore(ScaoTelemetryStore):
         self.streams['short'].write(sample)
 
     def trigger_code(self):
-        super().trigger_code()
+        self._capture_step()
         if self.current_time < self.start:
             return
         if (self.current_time + self.step - self.start) % (self.long_frames * self.step) == 0:

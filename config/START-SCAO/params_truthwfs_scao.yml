@@ -1,6 +1,6 @@
 # Native SCAO science graph using the supplied truth SHWFS and empirical modes.
-# Run this file alone for science; pair it with one calib_*.yml for a bench.
-# See README.md and run_psf_grid.py for windowed J/K exposures and field replay.
+# Pair this base graph with one calib_*.yml for a calibration bench.
+# See README.md and run_psf_grid.py for synchronized J/K WebDataset generation.
 ---
 
 main:

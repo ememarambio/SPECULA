@@ -1,18 +1,11 @@
-# START-SCAO: J/K PSF exposures across a 21 arcsecond square
+# START-SCAO: synchronized J/K WebDataset generation
 
-`run_psf_grid.py run ... --dataset` runs the AO loop and the full science field
-together, writing synchronized training samples directly to WebDataset. See
-[WebDataset training samples](#webdataset-training-samples) below for this
-single-simulation workflow. Run commands from the repository root with a Python
-environment containing SPECULA's dependencies.
+`run_psf_grid.py` runs the AO loop and the entire science field together,
+streaming 100-step training samples and independent long-exposure PSFs directly
+to WebDataset. Run the commands below from the repository root.
 
-The existing FITS workflow is also available: without `--dataset`, the science
-run saves commands and on-axis exposures, followed by a separate field replay.
-
-Upstream now bundles the `iteras` simulation engine and adds `h5py` to its
-requirements. Update the active environment after pulling with
-`python -m pip install -e .` from the repository root. This workflow explicitly
-uses explicit output formats regardless of the ITERAS default storage format.
+SPECULA includes the `iteras` engine. Install the dataset extra below to update
+the environment and include WebDataset support.
 
 ## Calibration
 
@@ -37,24 +30,25 @@ reconstructors. Previously generated SH calibration products must be replaced.
 The empirical basis does not need to be reimported if it is already present.
 Displays are in `display.yml`, separate from these benches.
 
-## FITS science run and field replay
+## WebDataset training samples
+
+Install the optional [WebDataset](https://github.com/webdataset/webdataset)
+dependency, then run the full dataset simulation:
 
 ```sh
-python config/START-SCAO/run_psf_grid.py run output/START-SCAO/run01
-python config/START-SCAO/run_psf_grid.py replay output/START-SCAO/run01
+python -m pip install -e '.[dataset]'
+python config/START-SCAO/run_psf_grid.py --target 0 --precision 1 run output/START-SCAO/train01
 ```
 
-CPU is the default. For CUDA use `--target 0` **before** `run` or `replay`;
-`--precision 0` selects float64 instead of the default float32. Replay restores
-the science run's recorded precision. Add `--displays` to `run` for the optional
-on-axis diagnostic plots.
+CPU is the default. For CUDA use `--target 0` before `run`; `--precision 1`
+selects float32 and `--precision 0` selects float64. Add `--displays` for the
+optional on-axis diagnostic plots.
 
-`psf_grid.yml` controls the science duration, settling time, exposure windows,
-field sampling, batch size, PSF sampling, stamp size and wavelengths. A copy is saved with
-each science run and used by replay. To use another settings file, pass
-`run ... --settings PATH`. `run ... --science-time 30` records 30 seconds after
-settling, producing three independent 10 s exposures. The usable duration must
-contain complete short and long windows; invalid durations are rejected.
+`psf_grid.yml` controls science and settling durations, exposure windows, field
+sampling, stamp size, and J/K wavelengths. Pass `--settings PATH` to use another
+settings file. `--science-time 30` generates 30 seconds after settling: 150
+training samples and three independent 10-second exposures. The duration must
+contain complete short and long windows. Each run saves a frozen settings copy.
 
 Defaults:
 
@@ -67,7 +61,6 @@ Defaults:
 | Long exposure | 5,000 frames = 10 s; one image per point/band |
 | Field | 21″ total width on each axis, from −10.5″ to +10.5″ |
 | Grid | 32 × 32 points, including the boundaries; spacing 21/31 ≈ 0.677″ |
-| Replay batch | 16 field points, both bands |
 | J / K wavelength | 1,250 / 2,200 nm |
 | Calculated PSF size | 512 × 512 pixels (`pixel_pupil: 256`, `nd: 2`) |
 | Saved PSF stamp | Central 128 × 128 pixels (`stamp_size: 128`) |
@@ -77,116 +70,32 @@ Defaults:
 
 These are normalized monochromatic PSFs at representative band wavelengths,
 not filter-integrated or detector-count images. The shared J/K OPD calculation
-requires geometric propagation without chromatic shifts; the replay builder
+requires geometric propagation without chromatic shifts; the dataset builder
 rejects Fresnel/chromatic propagation settings. A 0.2 s finite exposure need
 not be statistically converged to an infinite-exposure PSF. Check the settling
 duration against the loop behavior for the actual observing conditions.
 
-`atmo.fov` is set to the full square width before the science run so all replay
-directions fit within the atmospheric layers. The atmosphere seed, parameters,
-precision, commands, and `dm.out_layer:-1` delay are preserved. Each batch starts
-at t=0, including settling, to reproduce the same evolving atmosphere and DM
-history. Commands with missing timestamps or downsampling are rejected.
-
-## Exposure semantics and FITS layout
-
-Each instantaneous PSF feeds two `WindowedIntegration` objects. They average
-intensity over independent, non-overlapping windows and clear their accumulators
-after each completed exposure. Only completed windows update their output
-timestamp. `PsfExposureStore` writes each resulting cube immediately, keeping
-memory bounded as simulation duration grows. It never writes a partial window
-or replaces an existing exposure. It does not use `PSF.out_int_psf`, which is
-averaged only when the whole simulation finishes.
-
-`stamp_size: 128` crops each completed exposure about the FFT center, retaining
-the native pixel scale at `nd: 2.0` (two pixels per lambda/D). It does not
-recenter on the brightest pixel or renormalize the crop: flux outside the
-stamp is excluded, so the saved pixel sum is the retained fraction of the
-full PSF's unit flux. Set `stamp_size: null` to save the full calculated image.
-The same crop applies to on-axis and field PSFs in both exposure windows and
-both bands. Display images continue to show the full instantaneous PSF.
-
-The writer uses the simulation device so readiness checks read the window
-timestamps without copying their image buffers. Completed stamps are cropped
-on that device and then transferred to the CPU for FITS output. There are no
-full-size CPU mirror buffers for the window outputs. If configuring processing
-objects on different devices manually, keep each writer on its producers' device.
-
-For example, short exposure 0 covers [0.2, 0.4), exposure 1 covers [0.4, 0.6),
-and long exposure 0 covers [0.2, 10.2). The internal producer timestamp labels
-the final sample (0.398 s for the first short exposure); FITS records the actual
-start and exclusive end bounds. The mean of the first 50 short exposures equals
-the first long exposure up to floating-point summation error.
-
-Output structure:
-
-```text
-run01/
-  comm.fits                    # Every DM input command, including settling
-  params.yml                   # Actual science graph
-  replay_params.yml            # Recorded precision and seeds
-  science.yml                  # Generated science input
-  psf_grid.yml                 # Frozen exposure/grid settings
-  SCIENCE_COMPLETE             # Written only after the science stage returns
-  on_axis/J/short/exposure_000000.fits
-  on_axis/J/long/exposure_000000.fits
-  on_axis/K/...                # Same layout
-  field/grid.csv               # FIELD_ID,x_arcsec,y_arcsec for the entire grid
-  field/batch_0000_0015/
-    replay.yml                 # Exact batch graph
-    COMPLETE.json              # Written only after the entire batch succeeds
-    J/short/exposure_000000.fits
-    J/long/exposure_000000.fits
-    K/...
-```
-
-Each exposure's primary HDU is an array `[field, 128, 128]` by default. Its header
-contains `BAND`, `WAVELEN` (nm), `PIXSCALE` (mas/pixel), `NFRAMES`, `EXPTIME`,
-`TIMEDEL`, `TSTART`, and `TEND` (seconds). `FULLNX`/`FULLNY` record the original
-image dimensions, `CROPX0`/`CROPY0` give the zero-based crop origin,
-`FOVX`/`FOVY` give the stamp's angular width/height in arcseconds, and
-`NORM=FULLPSF` records that normalization applies before cropping.
-The `FIELD` table maps the first array
-axis to `FIELD_ID`, `X_ARCSEC`, and `Y_ARCSEC`. Grid IDs are row-major:
-`FIELD_ID = iy * grid_size + ix`; x varies fastest. The even-sized field grid
-does not include (0, 0); separate on-axis diagnostics use `FIELD_ID = -1`.
-
-For a small initial replay or a later subset:
-
-```sh
-python config/START-SCAO/run_psf_grid.py replay output/START-SCAO/run01 --point-count 16
-python config/START-SCAO/run_psf_grid.py replay output/START-SCAO/run01 --first-point 16
-```
-
-Use `--batch-size 4` to lower peak memory. Existing batch directories cause an
-error rather than being overwritten. After a failed batch, retain/remove its
-incomplete directory as appropriate and restart at its first point. Completed
-batches have `COMPLETE.json`; no automatic skip or overwrite is performed.
-
-The default full grid produces about **6.375 GiB** of uncompressed float32 image
-data per 10 s of science, plus on-axis diagnostics and small metadata files.
-Float64 doubles this. Cropping reduces saved image data by a factor of 16;
-the full FFTs and exposure accumulation still use 512 × 512 arrays. Batching
-limits memory, not disk usage or total FFT work.
-Benchmark a small batch before processing all 1,024 points.
-
-## WebDataset training samples
-
-Install the optional [WebDataset](https://github.com/webdataset/webdataset)
-dependency, then run the full dataset simulation:
-
-```sh
-python -m pip install -e '.[dataset]'
-python config/START-SCAO/run_psf_grid.py --target 0 --precision 1 run output/START-SCAO/train01 --dataset
-```
+`atmo.fov` covers the full square field. All directions use the same evolving
+atmosphere and delayed DM state in the live AO loop.
 
 This computes **all 1,024 grid points plus on-axis in both J and K during the
-same AO simulation**. `batch_size` is ignored in dataset mode. Each completed
+same AO simulation**. Each completed
 100-step sample is written through `webdataset.ShardWriter` immediately;
 there is no replay, FITS/NPZ staging, command-history file, or export pass.
 The full PSF calculations and exposure buffers must fit on the selected device.
 Use float32 (`--precision 1`, the default) for the planned 40 GB A100 run.
 The full-size GPU run has not been profiled; validation uses small CPU fields.
+
+Each instantaneous PSF feeds two independent `WindowedIntegration` objects.
+They clear their intensity accumulators after each completed window; their
+output timestamp updates only at an exposure boundary. Only completed windows
+are written. For the default timing, short exposure 0 covers [0.2, 0.4), short
+exposure 1 covers [0.4, 0.6), and long exposure 0 covers [0.2, 10.2).
+
+`stamp_size: 128` crops about the FFT center at the native `nd: 2.0` sampling.
+The crop keeps its original flux: the saved sum is the retained fraction of
+full-PSF unit flux. Set `stamp_size: null` for full calculated images. Cropping
+applies to both bands, all field positions, and both exposure durations.
 
 Training targets use the independent 100-frame exposures. The independent
 10-second J/K exposures are saved directly to a **second WebDataset stream**
@@ -215,7 +124,7 @@ Each sample covers exactly 100 consecutive steps after settling: 0.2 s at
 500 Hz. With the defaults, the first sample covers steps 100–199, timestamps
 0.200–0.398 s, and exposure interval **[0.200, 0.400) s**. The next starts at
 step 200. Ten seconds of science produces 50 samples, with no overlapping
-windows. `--dataset` requires `short_frames: 100` and one detector exposure
+windows. Generation requires `short_frames: 100` and one detector exposure
 per simulation step.
 
 Every tar sample has a unique `<run_id>_<window_index>` key and these members:
@@ -302,7 +211,3 @@ commands, frames, phase, psf_j, psf_k, pupil, metadata = next(iter(samples))
 NumPy members are serialized with pickle disabled. Keep shuffle buffers and
 training batches small initially: each sample already contains 100 frames
 and both complete PSF fields.
-
-`generate_webdataset.py` remains available to convert legacy runs that already
-contain `dataset_telemetry/*.npz` and completed FITS field replays. It is not
-part of the direct simulation workflow above.

@@ -5,9 +5,7 @@
 
 ### New processing and data objects
 
-- START-SCAO `run --dataset` now computes the complete J/K field in the science loop and streams aligned 100-step training samples directly through WebDataset, with a separate long-exposure PSF stream. No intermediate telemetry/FITS export or replay is required. Open shards remain partial on interruption; manifests are published only after complete capture.
-- Added opt-in START-SCAO training telemetry and WebDataset export: each sample pairs 100 synchronized applied DM commands, controller outputs, SHWFS detector frames, and on-axis residual phases with the matching J/K PSF grid and on-axis exposures. Capture streams bounded windows; export validates timing and complete field coverage.
-- Added `PsfExposureStore` to stream synchronized PSF exposure cubes to FITS with field coordinates and exposure timing. The START-SCAO workflow records full-cadence DM commands and replays a 32×32, 21 arcsecond square field in J/K with independent 100-frame and 10-second averages. At `nd: 2.0`, central 128×128 stamps retain the native pixel scale (2.08 arcseconds across in J, 3.67 in K), with no renormalization after cropping.
+- START-SCAO now generates only direct WebDataset output: synchronized 100-step commands, SHWFS frames, on-axis phases, and complete J/K PSF fields, plus independent long-exposure PSF shards. Removed the earlier FITS/replay, NPZ capture, and offline export paths; `run` needs no mode flag. Completed stamps are cropped on the simulation device before host transfer.
 
 ### Interface changes
 
@@ -21,7 +19,6 @@
 
 ### Other
 
-- `PsfExposureStore` now follows the simulation device instead of forcing CPU input connections. This avoids full-size window-buffer transfers at every readiness check; only the cropped stamps of completed exposures are copied to the CPU for FITS output.
 - `LowPassFilter` without `n_ord` and `amplif_fact` failed with a `TypeError`; it now uses the second-order Butterworth filter, the default of `IirFilterData.lpf_from_fc()`.
 - `IirFilterData`: `num` and `den` with a different number of columns are given the same width, adding zeros on the lowest order side. `IirFilter` aligns them on the highest order coefficient, while the analysis methods (`frequency_response()`, `RTF()`, `NTF()`, the stability methods, `to_control_tf()`) aligned them on the lowest order one, so their transfer function differed from the simulated one (e.g. `num=[0.5]`, `den=[-1, 1]`: 0.5/(z-1) instead of 0.5 z/(z-1)). The simulation does not change.
 - `IirFilterData`: `get_zeros()` and `get_poles()` return complex arrays (complex roots, e.g. the poles of an underdamped second-order filter, were truncated to their real part); `set_zeros()` and `set_poles()` accept complex roots in conjugate pairs and raise a `ValueError` otherwise.

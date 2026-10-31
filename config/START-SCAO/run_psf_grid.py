@@ -1,12 +1,9 @@
-"""Run START-SCAO with direct WebDataset output or FITS exposures and field replay.
+"""Run START-SCAO and stream full-field J/K training samples directly to WebDataset.
 
 Run from the repository root. See README.md for calibration and output details.
 """
 
 import argparse
-from copy import deepcopy
-import gc
-import json
 from pathlib import Path
 import sys
 
@@ -29,7 +26,7 @@ def frame_count(seconds, step, name):
     return count
 
 
-def validate_settings(settings, params, validate_batch=True):
+def validate_settings(settings, params):
     step = params['main']['time_step']
     if not np.isfinite(step) or step <= 0:
         raise ValueError('time_step must be positive')
@@ -37,13 +34,14 @@ def validate_settings(settings, params, validate_batch=True):
     frame_count(settings['settling_time'], step, 'settling_time')
     long = frame_count(settings['long_exposure'], step, 'long_exposure')
     short = settings['short_frames']
-    if not isinstance(short, int) or short <= 0 or long <= 0:
-        raise ValueError('Exposure frame counts must be positive integers')
+    if not isinstance(short, int) or short != 100:
+        raise ValueError('short_frames must be 100 for aligned training samples')
+    if long <= 0:
+        raise ValueError('long_exposure must contain at least one simulation step')
     if science <= 0 or science % short or science % long:
         raise ValueError('science_time must contain whole short and long exposures')
-    for key in (('grid_size', 'batch_size') if validate_batch else ('grid_size',)):
-        if not isinstance(settings[key], int) or settings[key] < (2 if key == 'grid_size' else 1):
-            raise ValueError(f'Invalid {key}')
+    if not isinstance(settings['grid_size'], int) or settings['grid_size'] < 2:
+        raise ValueError('grid_size must be an integer >= 2')
     for key in ('field_width_arcsec', 'nd'):
         if not np.isfinite(settings[key]) or settings[key] <= 0:
             raise ValueError(f'{key} must be finite and positive')
@@ -67,18 +65,13 @@ def field_grid(settings):
     return np.column_stack((x.ravel(), y.ravel()))
 
 
-def add_exposures(params, settings, psf_names, positions, field_ids, output_dir,
-                  fits_output=True):
-    """Attach independent averaging windows; optionally stream them to FITS."""
-    from specula.lib.calc_psf import calc_psf_geometry
-
-    short, long = validate_settings(settings, params, validate_batch=fits_output)
+def add_psf_windows(params, settings, psf_names):
+    """Attach independent short and long intensity averages for the writer."""
+    short, long = validate_settings(settings, params)
     main = params['main']
     size = int(np.around(main['pixel_pupil'] * settings['nd'] / 2) * 2)
     windows = {}
-    for band, wavelength in settings['bands_nm'].items():
-        geometry = calc_psf_geometry(main['pixel_pupil'], main['pixel_pitch'],
-                                     wavelength, nd=settings['nd'])
+    for band in ('J', 'K'):
         for label, count in [('short', short), ('long', long)]:
             refs = []
             for i, psf in enumerate(psf_names[band]):
@@ -91,18 +84,6 @@ def add_exposures(params, settings, psf_names, positions, field_ids, output_dir,
                 }
                 refs.append(f'{name}.output')
             windows[f'in_{label}_{band}'] = refs
-            if not fits_output:
-                continue
-            params[f'store_{band}_{label}'] = {
-                'class': 'PsfExposureStore', 'simul_params_ref': 'main',
-                'store_dir': str(Path(output_dir) / band / label),
-                'band': band, 'wavelength_nm': wavelength,
-                'pixel_size_mas': geometry.pixel_size_mas, 'n_frames': count,
-                'stamp_size': settings.get('stamp_size'),
-                'positions': np.asarray(positions).tolist(),
-                'field_ids': list(map(int, field_ids)),
-                'start_time': settings['settling_time'], 'inputs': {'in_psfs': refs},
-            }
     return windows
 
 
@@ -110,8 +91,7 @@ def run_params(params, path):
     from specula.simul import Simul
 
     path.write_text(yaml.safe_dump(params, sort_keys=False))
-    # Always start at zero: both atmospheric evolution and the delayed DM
-    # feedback must have exactly the same history as in the original run.
+    # Start the AO loop at zero, including settling and the delayed DM feedback.
     simulation = Simul(str(path), log_level='warning')
     try:
         simulation.run()
@@ -124,10 +104,8 @@ def run_params(params, path):
         raise
 
 
-def add_dataset_capture(params, settings, run_dir):
-    """Legacy NPZ capture wiring, also reused for the direct writer's telemetry."""
-    if settings['short_frames'] != 100:
-        raise ValueError('Dataset samples require short_frames: 100')
+def validate_science_graph(params):
+    """Require the shared on-axis residual and synchronized detector/DM timing."""
     if params['detector_truth_sh']['dt'] != params['main']['time_step']:
         raise ValueError('Dataset capture requires one SHWFS exposure per simulation step')
     prop = params['prop']
@@ -137,26 +115,12 @@ def add_dataset_capture(params, settings, run_dir):
     for source in ('source_science_j', 'source_ngs'):
         if params[source]['polar_coordinates'][0] != 0:
             raise ValueError('Dataset capture requires on-axis science and SHWFS sources')
-    params['dataset_telemetry'] = {
-        'class': 'ScaoTelemetryStore', 'simul_params_ref': 'main',
-        'store_dir': str(Path(run_dir) / 'dataset_telemetry'),
-        'n_frames': 100, 'start_time': settings['settling_time'],
-        'phase_wavelength_nm': settings['bands_nm']['J'],
-        'inputs': {
-            'in_commands': 'integrator.out_comm',
-            'in_applied_commands': 'dm.out_clipped_command:-1',
-            'in_pixels': 'detector_truth_sh.out_pixels',
-            'in_ef': 'prop.out_source_science_j_ef',
-        },
-    }
 
 
 def add_direct_dataset(params, settings, run_dir, shard_size=4, max_shard_bytes=1024**3):
     """Compute the entire field in the live AO loop and write complete samples."""
-    validate_settings(settings, params, validate_batch=False)
-    add_dataset_capture(params, settings, run_dir)
-    capture = params.pop('dataset_telemetry')
-    params.pop('telemetry', None)
+    validate_settings(settings, params)
+    validate_science_graph(params)
     points = field_grid(settings)
     sources, names = [], {'J': ['psf_j'], 'K': ['psf_k']}
     for i, (x, y) in enumerate(points):
@@ -178,8 +142,7 @@ def add_direct_dataset(params, settings, run_dir, shard_size=4, max_shard_bytes=
             }
     params['prop']['source_dict_ref'].extend(sources)
     params['prop'].setdefault('outputs', []).extend(f'out_{source}_ef' for source in sources)
-    windows = add_exposures(params, settings, names, np.vstack(([0., 0.], points)),
-                            range(-1, len(points)), run_dir, fits_output=False)
+    windows = add_psf_windows(params, settings, names)
     params['dataset'] = {
         'class': 'ScaoWebdatasetStore', 'simul_params_ref': 'main',
         'store_dir': str(Path(run_dir) / 'dataset'),
@@ -189,7 +152,13 @@ def add_direct_dataset(params, settings, run_dir, shard_size=4, max_shard_bytes=
         'long_frames': frame_count(settings['long_exposure'], params['main']['time_step'], 'long_exposure'),
         'start_time': settings['settling_time'], 'dm_sign': params['dm'].get('sign', -1),
         'shard_size': shard_size, 'max_shard_bytes': max_shard_bytes,
-        'inputs': {**capture['inputs'], **windows},
+        'inputs': {
+            'in_commands': 'integrator.out_comm',
+            'in_applied_commands': 'dm.out_clipped_command:-1',
+            'in_pixels': 'detector_truth_sh.out_pixels',
+            'in_ef': 'prop.out_source_science_j_ef',
+            **windows,
+        },
     }
 
 
@@ -198,7 +167,7 @@ def run_science(args):
     settings = yaml.safe_load(args.settings.read_text())
     if args.science_time is not None:
         settings['science_time'] = args.science_time
-    validate_settings(settings, params, validate_batch=not args.dataset)
+    validate_settings(settings, params)
     params['main']['total_time'] = settings['settling_time'] + settings['science_time']
     params['main']['root_dir'] = str(Path(params['main']['root_dir']).resolve())
     params['atmo']['fov'] = settings['field_width_arcsec']
@@ -209,116 +178,18 @@ def run_science(args):
     if args.displays:
         params.update(yaml.safe_load((HERE / 'display.yml').read_text()))
     run_dir = args.run_dir.resolve()
-    if args.dataset:
-        try:
-            import webdataset  # Fail before creating a run or allocating the full GPU graph.
-        except ImportError as exc:
-            raise ImportError('Install dataset support: python -m pip install -e ".[dataset]"') from exc
-        if (args.shard_size < 1 or not np.isfinite(args.max_shard_gib) or args.max_shard_gib <= 0):
-            raise ValueError('Shard limits must be positive and finite')
-        add_direct_dataset(params, settings, run_dir, args.shard_size, int(args.max_shard_gib * 1024**3))
+    try:
+        import webdataset  # Fail before creating a run or allocating the full GPU graph.
+    except ImportError as exc:
+        raise ImportError('Install dataset support: python -m pip install -e ".[dataset]"') from exc
+    if (args.shard_size < 1 or not np.isfinite(args.max_shard_gib) or args.max_shard_gib <= 0):
+        raise ValueError('Shard limits must be positive and finite')
+    add_direct_dataset(params, settings, run_dir, args.shard_size, int(args.max_shard_gib * 1024**3))
     run_dir.mkdir(parents=True, exist_ok=False)
-    settings_path = run_dir / 'psf_grid.yml'
-    settings_path.write_text(yaml.safe_dump(settings, sort_keys=False))
-    if args.dataset:
-        run_params(params, run_dir / 'science.yml')
-        (run_dir / 'DATASET_COMPLETE').write_text('Direct training and long-exposure WebDataset streams saved.\n')
-        print(f'Dataset complete: {run_dir / "dataset"}')
-        return
-    params['telemetry'] = {
-        'class': 'DataStore', 'store_dir': str(run_dir), 'create_tn': False, 'data_format': 'fits',
-        'inputs': {'input_list': ['comm-integrator.out_comm']},
-    }
-    add_exposures(params, settings, {'J': ['psf_j'], 'K': ['psf_k']},
-                  [[0.0, 0.0]], [-1], run_dir / 'on_axis')
+    (run_dir / 'psf_grid.yml').write_text(yaml.safe_dump(settings, sort_keys=False))
     run_params(params, run_dir / 'science.yml')
-    validate_commands(run_dir, params)
-    (run_dir / 'SCIENCE_COMPLETE').write_text('Full-cadence commands and on-axis exposures saved.\n')
-    print(f'Science run complete: {run_dir}')
-
-
-def validate_commands(run_dir, params):
-    """Reject missing frames instead of replaying a stale DM command silently."""
-    from astropy.io import fits
-    from specula.base_time_obj import BaseTimeObj
-
-    step = params['main']['time_step']
-    count = frame_count(params['main']['total_time'], step, 'total_time')
-    ticks = BaseTimeObj(target_device_idx=-1).seconds_to_t(step)
-    # DataStore timestamps are uint64 FITS images with BZERO scaling.
-    with fits.open(run_dir / 'comm.fits', memmap=False) as hdul:
-        times = hdul[1].data
-        if hdul[0].header.get('DOWNSAMP', 1) != 1 or not np.array_equal(
-                times, np.arange(count, dtype=np.int64) * ticks):
-            raise ValueError('Replay requires every DM command from t=0, without gaps or downsampling')
-
-
-def batch_params(base, settings, positions, field_ids, output_dir):
-    params = deepcopy(base)
-    if params['prop'].get('doFresnel', False) or params['prop'].get('enable_chromatic_effect', False):
-        raise ValueError('Sharing J/K OPD requires geometric propagation without chromatic shifts')
-    sources, names = [], {'J': [], 'K': []}
-    for i, (x, y) in enumerate(positions):
-        source = f'field_{i}'
-        sources.append(source)
-        params[source] = {
-            'class': 'Source', 'polar_coordinates': [float(np.hypot(x, y)),
-                float(np.degrees(np.arctan2(y, x)) % 360)],
-            'magnitude': 8.0, 'wavelengthInNm': settings['bands_nm']['J'], 'band': 'J',
-        }
-        for band, wavelength in settings['bands_nm'].items():
-            name = f'psf_{band}_{i}'
-            names[band].append(name)
-            params[name] = {
-                'class': 'PSF', 'simul_params_ref': 'main', 'wavelengthInNm': wavelength,
-                'nd': settings['nd'], 'start_time': settings['settling_time'],
-                'inputs': {'in_ef': f'prop.out_{source}_ef'},
-            }
-    params['prop']['source_dict_ref'] = sources
-    params['prop']['outputs'] = [f'out_{s}_ef' for s in sources]
-    add_exposures(params, settings, names, positions, field_ids, output_dir)
-    return params
-
-
-def replay_field(args):
-    from specula.base_replay_analyser import BaseReplayAnalyser
-
-    run_dir = args.run_dir.resolve()
-    if (run_dir / 'DATASET_COMPLETE').exists():
-        raise ValueError('This run already contains the full field in WebDataset; replay is unnecessary')
-    if not (run_dir / 'SCIENCE_COMPLETE').exists():
-        raise ValueError('Run the science stage successfully before field replay')
-    settings = yaml.safe_load((run_dir / 'psf_grid.yml').read_text())
-    analyser = BaseReplayAnalyser(str(run_dir.parent), run_dir.name, start_time=0)
-    validate_settings(settings, analyser.params)
-    validate_commands(run_dir, analyser.params)
-    if analyser.params['atmo']['fov'] < settings['field_width_arcsec']:
-        raise ValueError('Recorded atmosphere is too small for the field; rerun science')
-    # An optional uncorrected display propagation is not part of the science beam.
-    analyser.params.pop('prop_uncorrected', None)
-    base = analyser._build_replay_params_from_datastore('prop')
-    points = field_grid(settings)
-    start = args.first_point
-    stop = len(points) if args.point_count is None else start + args.point_count
-    batch_size = settings['batch_size'] if args.batch_size is None else args.batch_size
-    if not 0 <= start < stop <= len(points) or batch_size <= 0:
-        raise ValueError('Invalid field range or batch size')
-    output = run_dir / 'field'
-    output.mkdir(exist_ok=True)
-    # Row-major grid: FIELD_ID = iy * grid_size + ix, x varies fastest.
-    np.savetxt(output / 'grid.csv', np.column_stack((np.arange(len(points)), points)),
-               delimiter=',', header='field_id,x_arcsec,y_arcsec', comments='',
-               fmt=['%d', '%.12g', '%.12g'])
-    for first in range(start, stop, batch_size):
-        last = min(first + batch_size, stop)
-        batch = output / f'batch_{first:04d}_{last - 1:04d}'
-        batch.mkdir(exist_ok=False)
-        print(f'Replaying field points {first}–{last - 1} of {len(points)}', flush=True)
-        params = batch_params(base, settings, points[first:last], range(first, last), batch)
-        run_params(params, batch / 'replay.yml')
-        (batch / 'COMPLETE.json').write_text(json.dumps({'first': first, 'stop': last}) + '\n')
-        gc.collect()
-    print(f'Field PSFs saved in {output}')
+    (run_dir / 'DATASET_COMPLETE').write_text('Training and long-exposure WebDataset streams saved.\n')
+    print(f'Dataset complete: {run_dir / "dataset"}')
 
 
 def main():
@@ -326,36 +197,18 @@ def main():
     parser.add_argument('--target', type=int, default=-1, help='-1 for CPU, 0+ for CUDA GPU')
     parser.add_argument('--precision', type=int, choices=[0, 1], default=1)
     sub = parser.add_subparsers(dest='command', required=True)
-    science = sub.add_parser('run', help='Run the AO loop with FITS output or a direct full-field dataset')
+    science = sub.add_parser('run', help='Generate full-field training samples directly in WebDataset')
     science.add_argument('run_dir', type=Path, help='New output directory')
     science.add_argument('--settings', type=Path, default=HERE / 'psf_grid.yml')
     science.add_argument('--science-time', type=float, help='Usable duration after settling [s]')
     science.add_argument('--displays', action='store_true')
-    science.add_argument('--dataset', action='store_true',
-                         help='Write full-field J/K WebDataset samples directly in one simulation')
     science.add_argument('--shard-size', type=int, default=4, help='Dataset samples per shard (default: 4)')
     science.add_argument('--max-shard-gib', type=float, default=1.,
                          help='Dataset shard size threshold in GiB (default: 1; rotation between samples)')
-    replay = sub.add_parser('replay', help='Compute J/K field exposures from a saved run')
-    replay.add_argument('run_dir', type=Path)
-    replay.add_argument('--batch-size', type=int)
-    replay.add_argument('--first-point', type=int, default=0)
-    replay.add_argument('--point-count', type=int)
     args = parser.parse_args()
     import specula
-    precision = args.precision
-    if args.command == 'replay':
-        if (args.run_dir / 'DATASET_COMPLETE').exists():
-            parser.error('This run already contains the full field in WebDataset; replay is unnecessary')
-        # Select precision before importing any SPECULA submodule: several
-        # modules capture the defaults at import time, so re-init is too late.
-        recorded = yaml.safe_load((args.run_dir / 'replay_params.yml').read_text())
-        precision = recorded['data_source']['global_precision']
-    specula.init(args.target, precision=precision)
-    if args.command == 'run':
-        run_science(args)
-    else:
-        replay_field(args)
+    specula.init(args.target, precision=args.precision)
+    run_science(args)
 
 
 if __name__ == '__main__':
