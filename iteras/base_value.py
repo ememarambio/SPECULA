@@ -1,7 +1,6 @@
 
 import iteras
 from iteras import np
-from astropy.io import fits
 from iteras.base_data_obj import BaseDataObj
 from iteras.lib import storage
 
@@ -73,6 +72,10 @@ class BaseValue(BaseDataObj):
         return self.value
 
     def get_fits_header(self):
+        # FITS is needed only for serialization. Importing astropy eagerly can
+        # also load CuPy/SciPy helpers through its module introspection.
+        from astropy.io import fits
+
         hdr = fits.Header()
         hdr['VERSION'] = 1
         hdr['OBJ_TYPE'] = 'BaseValue'
