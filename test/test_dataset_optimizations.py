@@ -126,6 +126,7 @@ def test_stamp_averages_match_full_psf_crop(device, stamp):
 
 @pytest.mark.parametrize('device', DEVICES)
 def test_psf_only_mode_matches_full_psf_without_statistics_buffers(device):
+    xp = np if device < 0 else specula.cp
     params = SimulParams(pixel_pupil=8, pixel_pitch=.1)
     ef = ElectricField(8, 8, .1, target_device_idx=device)
     standard = DatasetPSF(params, 1250., nd=2., target_device_idx=device)
@@ -134,12 +135,18 @@ def test_psf_only_mode_matches_full_psf_without_statistics_buffers(device):
         obj.inputs['in_ef'].set(ef)
         obj.setup()
     for step in range(3):
-        ef.phaseInNm[:] = np.arange(64).reshape(8, 8) * step
+        ef.phaseInNm[:] = xp.arange(64).reshape(8, 8) * step
         ef.generation_time = step * fast.seconds_to_t(.002)
         for obj in (standard, fast):
-            obj.check_ready(ef.generation_time)
-            obj.trigger()
-            obj.post_trigger()
+            no_host_copy = nullcontext()
+            if obj is fast and device >= 0:
+                import cupyx
+                no_host_copy = cupyx.allow_synchronize(False)
+            with no_host_copy:
+                obj.check_ready(ef.generation_time)
+                obj.trigger()
+                obj.post_trigger()
+        assert isinstance(fast.psf.value, xp.ndarray)
         np.testing.assert_allclose(cpuArray(fast.psf.value), cpuArray(standard.psf.value))
         assert fast.psf.generation_time == ef.generation_time
     fast.finalize()
