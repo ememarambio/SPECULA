@@ -162,7 +162,7 @@ Every tar sample has a unique `<run_id>_<window_index>` key and these members:
 | `dm_commands.npy` | `[100, 702]` | DM coefficients actually applied during each SHWFS exposure, before the DM's `sign: -1` |
 | `controller_commands.npy` | `[100, 702]` | Controller output emitted at those same simulation steps |
 | `shwfs_frames.npy` | `[100, 224, 224]` | Actual detector frames, including the configured noise, in native detector units |
-| `residual_phase.npy` | `[100, 256, 256]` | On-axis residual phase in unwrapped radians at 1,250 nm (the configured J wavelength) |
+| `residual_phase.npy` | `[100, 256, 256]` | On-axis residual phase in unwrapped radians at 1,250 nm (the configured J wavelength), with pupil-mean piston removed independently per frame |
 | `pupil.npy` | `[256, 256]` | Static pupil amplitude; phase is zero outside it |
 | `psf_j.npy`, `psf_k.npy` | `[1025, 128, 128]` each | Mean PSFs over exactly these 100 steps; field index 0 is on-axis |
 | `field_ids.npy` | `[1025]` | `[-1, 0, ..., 1023]`: on-axis followed by row-major grid IDs |
@@ -180,7 +180,15 @@ forms are provided explicitly. The integrator's own delay is already included
 in its output; no extra shift is applied. If settling is zero, the first
 applied command is the initial zero command, with generation timestamp `-1`.
 
-Residual phase keeps piston and is not wrapped modulo 2π. Convert it to K-band
+Residual phase has its piston removed and is not wrapped modulo 2π. For each
+of the 100 frames, the arithmetic mean over nonzero pupil pixels is subtracted;
+pixels outside the pupil remain zero. This removes only the global piston,
+preserving relative phase between disconnected pupil regions. The live
+simulation electric field is not modified, and the PSF intensities are
+unaffected by this global phase offset. This applies to every saved residual,
+in both per-frame and device-buffered capture. Sample metadata records
+`phase_piston_removed: true` and the phase convention.
+Convert it to K-band
 radians with `phase_k = residual_phase * wavelength_j_nm / wavelength_k_nm`, or
 to wavelength-independent OPD in nm with
 `opd_nm = residual_phase * wavelength_j_nm / (2 * np.pi)`. The saved pupil must

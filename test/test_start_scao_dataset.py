@@ -106,6 +106,7 @@ def physical_run(tmp_path_factory):
                   ['source_science_j'] + [f'field_{i}' for i in range(4)]]
         amplitude = specula.cpuArray(fields[0].A, force_copy=True)
         phase = specula.cpuArray(fields[0].phaseInNm, force_copy=True) * (2 * np.pi / 1250.)
+        phase -= phase[amplitude != 0].mean(dtype=np.float64)
         phase[amplitude == 0] = 0
         phases.append(phase)
         targets.append(np.array([
@@ -145,7 +146,7 @@ def test_samples_preserve_actual_frames_commands_phases_and_full_field(physical_
                                    [20., -30.] + (steps[:, None] - 1) * .002 * [400., 200.],
                                    atol=command_atol)
         np.testing.assert_array_equal(sample['shwfs_frames.npy'], frames[first:first + 100])
-        np.testing.assert_allclose(sample['residual_phase.npy'], phases[first:first + 100], rtol=2e-7)
+        np.testing.assert_allclose(sample['residual_phase.npy'], phases[first:first + 100], rtol=2e-7, atol=2e-7)
         np.testing.assert_array_equal(sample['field_ids.npy'], [-1, 0, 1, 2, 3])
         np.testing.assert_array_equal(sample['field_xy_arcsec.npy'],
                                    [[0., 0.], [-10.5, -10.5], [10.5, -10.5], [-10.5, 10.5], [10.5, 10.5]])
@@ -155,6 +156,10 @@ def test_samples_preserve_actual_frames_commands_phases_and_full_field(physical_
         assert sample['meta.json']['first_simulation_step'] == first
         assert sample['meta.json']['n_frames'] == 100
         assert sample['meta.json']['on_axis_index'] == 0
+        assert sample['meta.json']['phase_piston_removed'] is True
+        assert 'pupil-mean piston removed per frame' in sample['meta.json']['phase_convention']
+        pupil = sample['pupil.npy'] != 0
+        np.testing.assert_allclose(sample['residual_phase.npy'][:, pupil].mean(axis=1, dtype=np.float64), 0, atol=2e-7)
     long_manifest, long_samples = read_shards(root / 'dataset/long_exposures')
     assert long_manifest['samples'] == len(long_samples) == 2
     for index, sample in enumerate(long_samples):
@@ -448,3 +453,89 @@ def test_only_generation_command_is_run():
     result = subprocess.run([sys.executable, str(SCRIPT), 'replay', 'unused'], capture_output=True, text=True)
     assert result.returncode == 2
     assert 'invalid choice' in result.stderr
+
+
+@pytest.mark.parametrize('device', [-1, pytest.param(0, marks=pytest.mark.skipif(
+    specula.cp is None, reason='CuPy/GPU unavailable'))])
+@pytest.mark.parametrize('precision', [0, 1])
+@pytest.mark.parametrize('device_buffering', [False, True])
+@pytest.mark.parametrize('background_writes', [False, True])
+def test_saved_residuals_remove_piston_per_frame(tmp_path, device, precision,
+                                                device_buffering, background_writes):
+    pytest.importorskip('webdataset')
+    *objects, psfs = direct_inputs(tmp_path / 'dataset', device)
+    store, commands, applied, pixels, _ = objects
+    ef = ElectricField(4, 4, .1, target_device_idx=device, precision=precision)
+    objects[-1] = ef
+    store.inputs['in_ef'].set(ef)
+    store.device_buffering = device_buffering
+    store.background_writes = background_writes
+    # An asymmetric, disconnected pupil makes averaging the whole stamp wrong.
+    pupil = np.array([[1., .5, 0., 0.], [1., 1., 0., 1.],
+                      [0., 0., 0., 1.], [1., 1., 0., 1.]])
+    mask = pupil != 0
+    ef.A[:] = store.xp.asarray(pupil)
+    store.setup()
+    expected, original_radians = [], []
+    try:
+        for step in range(202):
+            tick = step * store.step
+            commands.value[:] = step
+            applied.value[:] = step - 1
+            pixels.pixels[:] = step
+            opd = (np.arange(16).reshape(4, 4) - 8) * (1 + .01 * step) + 400 + 5 * step
+            opd[~mask] = 1e6  # Outside-pupil values must not contribute to piston.
+            ef.phaseInNm[:] = store.xp.asarray(opd)
+            original = specula.cpuArray(ef.phaseInNm).copy()
+            for obj in (commands, pixels, ef):
+                obj.generation_time = tick
+            applied.generation_time = tick - store.step if step else -1
+            if step in (101, 201):
+                for key, values in psfs.items():
+                    if 'short' in key or step == 201:
+                        for value in values:
+                            value.generation_time = tick
+            assert store.check_ready(tick)
+            store.trigger()
+            store.post_trigger()
+            np.testing.assert_array_equal(specula.cpuArray(ef.phaseInNm), original)
+            if step >= 2:
+                radians = original.astype(np.float64) * (2 * np.pi / 1250.)
+                original_radians.append(radians.copy())
+                centered = radians.astype(np.float64)
+                centered -= centered[mask].mean()
+                centered[~mask] = 0
+                expected.append(centered)
+        store.finalize()
+    finally:
+        store.abort()
+    _, samples = read_shards(store.store_dir)
+    assert len(samples) == 2
+    for index, sample in enumerate(samples):
+        phase = sample['residual_phase.npy']
+        assert phase.dtype == ef.phaseInNm.dtype
+        np.testing.assert_allclose(phase, expected[index * 100:(index + 1) * 100], atol=1e-7, rtol=1e-6)
+        np.testing.assert_allclose(phase[:, mask].mean(axis=1, dtype=np.float64), 0, atol=1e-7)
+        np.testing.assert_array_equal(phase[:, ~mask], 0)
+        assert sample['meta.json']['phase_piston_removed'] is True
+        for band, wavelength in (('j', 1250.), ('k', 2200.)):
+            # Removing only a global phase offset must preserve both band PSFs.
+            for local_step in (0, 99):
+                original = original_radians[index * 100 + local_step].astype(np.float64)
+                before = calc_psf(original * 1250. / wavelength, pupil, imwidth=8,
+                                  normalize=True, complex_dtype=np.complex128)
+                after = calc_psf(phase[local_step].astype(np.float64) * 1250. / wavelength,
+                                 pupil, imwidth=8, normalize=True, complex_dtype=np.complex128)
+                np.testing.assert_allclose(after, before, rtol=3e-5, atol=2e-8)
+    assert json.loads((store.store_dir / 'metadata.json').read_text())['phase_piston_removed'] is True
+
+
+def test_constant_piston_is_zero_and_empty_pupil_is_rejected(tmp_path):
+    store, *_ = direct_inputs(tmp_path / 'dataset')
+    store.pupil = np.ones((4, 4))
+    opd = np.full((4, 4), 100.)
+    store._prepare_residual_phase(opd)
+    np.testing.assert_array_equal(opd, 0)
+    store.pupil[:] = 0
+    with pytest.raises(ValueError, match='nonempty pupil'):
+        store._prepare_residual_phase(np.ones((4, 4)))

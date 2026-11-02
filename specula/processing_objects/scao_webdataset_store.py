@@ -285,7 +285,8 @@ class ScaoWebdatasetStore(BaseProcessingObj):
             'tick_seconds': self.t_to_seconds(1),
             'phase_wavelength_nm': self.wavelength, 'phase_unit': 'rad',
             'phase_direction_arcsec': [0., 0.],
-            'phase_convention': 'unwrapped; zero outside pupil; piston retained',
+            'phase_convention': 'unwrapped; zero outside pupil; pupil-mean piston removed per frame',
+            'phase_piston_removed': True,
             'dm_commands': 'applied during this exposure, before DM sign',
             'controller_commands': 'emitted at the same simulation step',
             'applied_command_delay_steps': 1,
@@ -317,9 +318,8 @@ class ScaoWebdatasetStore(BaseProcessingObj):
             self.pupil = pupil.copy()
         elif not np.array_equal(pupil, self.pupil):
             raise ValueError('Dataset capture requires a static on-axis pupil')
-        phase = cpuArray(ef.phaseInNm, force_copy=True)
-        phase *= 2 * np.pi / self.wavelength
-        phase[self.pupil == 0] = 0
+        phase = cpuArray(ef.phaseInNm, dtype=ef.phaseInNm.dtype, force_copy=True)
+        self._prepare_residual_phase(phase)
         values = {
             'dm_commands': cpuArray(applied.value),
             'controller_commands': cpuArray(self.local_inputs['in_commands'].value),
@@ -386,16 +386,33 @@ class ScaoWebdatasetStore(BaseProcessingObj):
             if bool(cpuArray(self._pupil_changed)):
                 raise ValueError('Dataset capture requires a static on-axis pupil')
             for name, value in self._device_buffers.items():
-                host = cpuArray(value, force_copy=True)
                 if name == 'residual_phase':
-                    host *= 2 * np.pi / self.wavelength
-                    host[:, self.pupil == 0] = 0
+                    host = cpuArray(value, dtype=value.dtype, force_copy=True)
+                    self._prepare_residual_phase(host)
+                else:
+                    host = cpuArray(value, force_copy=True)
                 if not np.isfinite(host).all():
                     raise ValueError(f'Invalid or changing {name} array')
                 self.buffers[name] = host
             self._write_window()
             self.windows += 1
             self.frame = 0
+
+    def _prepare_residual_phase(self, phase):
+        """Remove piston from a private host OPD copy and convert to radians.
+
+        Piston is the arithmetic mean over nonzero pupil pixels, independently
+        for every frame (never over the time axis). Float64 reduction limits
+        accumulation error for float32 telemetry. This never modifies the live
+        electric field used by propagation, the controller or the PSF objects.
+        """
+        illuminated = self.pupil != 0
+        if not np.any(illuminated):
+            raise ValueError('Piston removal requires a nonempty pupil')
+        piston = np.mean(phase[..., illuminated], axis=-1, dtype=np.float64)
+        phase -= piston[..., None, None]
+        phase *= 2 * np.pi / self.wavelength
+        phase[..., ~illuminated] = 0
 
     def _validate_complete(self):
         if self.next_time != self.end or self.frame:
