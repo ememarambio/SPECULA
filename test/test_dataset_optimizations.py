@@ -1,6 +1,7 @@
 """Numerical and lifecycle checks for the optional dataset fast paths."""
 
 import logging
+from contextlib import nullcontext
 from unittest.mock import Mock
 
 import numpy as np
@@ -45,7 +46,8 @@ def test_dataset_psf_matches_standard_outputs(device):
                                    cpuArray(getattr(standard, name).value))
 
 
-def test_disabled_psf_logging_never_formats_device_scalar(monkeypatch):
+@pytest.mark.parametrize('device', DEVICES)
+def test_disabled_psf_logging_never_formats_device_scalar(monkeypatch, device):
     import specula.processing_objects.dataset_psf as module
 
     class DeviceScalar(np.ndarray):
@@ -55,8 +57,9 @@ def test_disabled_psf_logging_never_formats_device_scalar(monkeypatch):
         def __str__(self):
             raise AssertionError('Device scalar copied to host')
 
-    obj = DatasetPSF(SimulParams(pixel_pupil=8, pixel_pitch=.1), 1250., nd=2.)
-    ef = ElectricField(8, 8, .1, target_device_idx=-1)
+    obj = DatasetPSF(SimulParams(pixel_pupil=8, pixel_pitch=.1), 1250., nd=2.,
+                     target_device_idx=device)
+    ef = ElectricField(8, 8, .1, target_device_idx=device)
     obj.inputs['in_ef'].set(ef)
     obj.setup()
     obj.ref.i[:] = 1
@@ -66,10 +69,19 @@ def test_disabled_psf_logging_never_formats_device_scalar(monkeypatch):
         def __getitem__(self, key):
             return np.asarray(.5).view(DeviceScalar)
 
-    monkeypatch.setattr(module, 'calc_psf', lambda *a, **k: (DeviceImage(), 1.))
+    if device < 0:
+        monkeypatch.setattr(module, 'calc_psf', lambda *a, **k: (DeviceImage(), 1.))
+        no_host_copy = nullcontext()
+    else:
+        # Exercise the real GPU calculation. Scalar formatting or an explicit
+        # device-to-host copy must fail while synchronization is forbidden.
+        import cupyx
+        no_host_copy = cupyx.allow_synchronize(False)
     obj.logger = Mock()
     obj.logger.isEnabledFor.return_value = False
-    obj.trigger_code()
+    with no_host_copy:
+        obj.trigger_code()
+    assert isinstance(obj.sr.value, obj.xp.ndarray)
     obj.logger.isEnabledFor.assert_called_once_with(logging.INFO)
     obj.logger.info.assert_not_called()
 
