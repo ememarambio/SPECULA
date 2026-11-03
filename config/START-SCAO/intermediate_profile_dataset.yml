@@ -1,0 +1,25 @@
+# 150 independent observations, no pilot and no prescribed training split.
+# Linear interpolation of ABSOLUTE layer strengths between adjacent profiles.
+# Sampling ranges are coverage choices, not a measured observing distribution.
+science_time: 10.0
+settling_time: 1.0
+short_frames: 100
+long_exposure: 10.0
+field_width_arcsec: 21.0
+grid_size: 32
+nd: 2.0
+stamp_size: 128
+bands_nm: {J: 1250.0, K: 2200.0}
+campaign:
+  name: intermediate_profile
+  kind: intermediate
+  profile_catalog: oya2014_profiles.yml
+  profile_pairs: [[good, moderate], [moderate, bad]]
+  observations_per_pair: 75
+  # Stratified interpolation coefficients within (0, 1), shuffled per pair.
+  zenith_angle_range_deg: [0, 60]
+  wind_speed_scale_range: [0.5, 2.0]  # Uniform in scale, independently of zenith.
+  sampler_seed: 20261103
+  # Disjoint from the reference dataset's atmospheric and detector seeds.
+  simulation_seed_start: 2000000
+  pixel_phasescreens: 16384

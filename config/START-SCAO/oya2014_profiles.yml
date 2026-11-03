@@ -1,0 +1,20 @@
+# Oya et al. (2014), ULTIMATE-SUBARU: simulation update, Table 1.
+# Complete seeing-conditioned profiles; not independent per-layer quartiles.
+source_doi: '10.1117/12.2055701'
+reference_wavelength_nm: 500.0
+heights_m: [0, 500, 1000, 2000, 4000, 8000, 16000]
+outer_scale_m: 30.0
+# The paper uses MAOS defaults and artificial 50-degree direction increments.
+# These are simulation assumptions, not measured Subaru wind statistics.
+wind_speed_m_s: [5.6, 5.77, 6.25, 7.57, 13.31, 19.06, 12.14]
+wind_direction_deg: [0, 50, 100, 150, 200, 250, 300]
+profiles:
+  good:
+    integrated_cn2_m_1_3: 3.5781e-13
+    fractions: [0.7546, 0.0497, 0.0141, 0.0133, 0.0545, 0.0467, 0.0671]
+  moderate:
+    integrated_cn2_m_1_3: 5.2770e-13
+    fractions: [0.7316, 0.0650, 0.0193, 0.0252, 0.0574, 0.0500, 0.0515]
+  bad:
+    integrated_cn2_m_1_3: 8.1360e-13
+    fractions: [0.6882, 0.0798, 0.0398, 0.0395, 0.0551, 0.0548, 0.0428]

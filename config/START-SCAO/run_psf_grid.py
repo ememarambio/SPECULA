@@ -4,6 +4,7 @@ Run from the repository root. See README.md for calibration and output details.
 """
 
 import argparse
+import json
 from pathlib import Path
 import sys
 
@@ -14,6 +15,9 @@ import yaml
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 sys.path.insert(0, str(REPO))
+sys.path.insert(0, str(HERE))
+
+from dataset_campaign import apply_observation, build_observations
 
 
 def frame_count(seconds, step, name):
@@ -183,6 +187,18 @@ def run_science(args):
     if args.science_time is not None:
         settings['science_time'] = args.science_time
     validate_settings(settings, params)
+    observation = None
+    observation_index = getattr(args, 'observation', None)
+    if 'campaign' in settings:
+        observations = build_observations(settings, args.settings)
+        if observation_index is None or not 0 <= observation_index < len(observations):
+            raise ValueError(f'Choose --observation between 0 and {len(observations) - 1}')
+        observation = observations[observation_index]
+        apply_observation(params, settings, observation)
+        # Save self-contained resolved conditions rather than relative catalog references.
+        settings = {key: value for key, value in settings.items() if key != 'campaign'}
+    elif observation_index is not None:
+        raise ValueError('--observation requires a profile dataset settings file')
     params['main']['total_time'] = settings['settling_time'] + settings['science_time']
     params['main']['root_dir'] = str(Path(params['main']['root_dir']).resolve())
     params['atmo']['fov'] = settings['field_width_arcsec']
@@ -200,8 +216,12 @@ def run_science(args):
     if (args.shard_size < 1 or not np.isfinite(args.max_shard_gib) or args.max_shard_gib <= 0):
         raise ValueError('Shard limits must be positive and finite')
     add_direct_dataset(params, settings, run_dir, args.shard_size, int(args.max_shard_gib * 1024**3))
+    if observation is not None:
+        params['dataset']['observation_metadata'] = observation
     run_dir.mkdir(parents=True, exist_ok=False)
     (run_dir / 'psf_grid.yml').write_text(yaml.safe_dump(settings, sort_keys=False))
+    if observation is not None:
+        (run_dir / 'observation.json').write_text(json.dumps(observation, indent=2) + '\n')
     run_params(params, run_dir / 'science.yml')
     (run_dir / 'DATASET_COMPLETE').write_text('Training and long-exposure WebDataset streams saved.\n')
     print(f'Dataset complete: {run_dir / "dataset"}')
@@ -215,12 +235,26 @@ def main():
     science = sub.add_parser('run', help='Generate full-field training samples directly in WebDataset')
     science.add_argument('run_dir', type=Path, help='New output directory')
     science.add_argument('--settings', type=Path, default=HERE / 'psf_grid.yml')
+    science.add_argument('--observation', type=int,
+                         help='Zero-based observation index from a profile dataset settings file')
     science.add_argument('--science-time', type=float, help='Usable duration after settling [s]')
     science.add_argument('--displays', action='store_true')
     science.add_argument('--shard-size', type=int, default=4, help='Dataset samples per shard (default: 4)')
     science.add_argument('--max-shard-gib', type=float, default=1.,
                          help='Dataset shard size threshold in GiB (default: 1; rotation between samples)')
+    manifest = sub.add_parser('manifest', help='Print resolved observation records as JSONL; no simulation')
+    manifest.add_argument('--settings', type=Path, required=True)
     args = parser.parse_args()
+    if args.command == 'manifest':
+        settings = yaml.safe_load(args.settings.read_text())
+        params = yaml.safe_load((HERE / 'params_truthwfs_scao.yml').read_text())
+        validate_settings(settings, params)
+        observations = build_observations(settings, args.settings)
+        for observation in observations:
+            apply_observation(params, settings, observation)
+        for observation in observations:
+            print(json.dumps(observation))
+        return
     import specula
     specula.init(args.target, precision=args.precision)
     run_science(args)

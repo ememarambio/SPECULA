@@ -144,8 +144,9 @@ class ScaoWebdatasetStore(BaseProcessingObj):
                  shard_size: int = 4, max_shard_bytes: int = 1073741824,
                  dm_sign: int = -1, target_device_idx: int = None,
                  psfs_are_stamps: bool = False, device_buffering: bool = False,
-                 background_writes: bool = False):
+                 background_writes: bool = False, observation_metadata: dict = None):
         super().__init__(target_device_idx=target_device_idx)
+        self.observation_metadata = dict(observation_metadata or {})
         if set(bands_nm) != {'J', 'K'} or any(not np.isfinite(v) or v <= 0 for v in bands_nm.values()):
             raise ValueError('Expected positive J/K wavelengths')
         phase_wavelength_nm = bands_nm['J']
@@ -291,6 +292,8 @@ class ScaoWebdatasetStore(BaseProcessingObj):
             'controller_commands': 'emitted at the same simulation step',
             'applied_command_delay_steps': 1,
         }
+        if self.observation_metadata:
+            self.metadata['observation'] = self.observation_metadata
 
     def _validate_step(self):
         if self.current_time != self.next_time or self.current_time >= self.end:

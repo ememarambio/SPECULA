@@ -354,6 +354,25 @@ def test_grid_and_invalid_settings():
             workflow.validate_settings(invalid, params)
 
 
+def test_observation_metadata_is_saved_in_short_and_long_shards(small_config, tmp_path):
+    pytest.importorskip('webdataset')
+    params, settings = small_config
+    run = tmp_path / 'observation_metadata'
+    workflow.add_direct_dataset(params, settings, run)
+    params['dataset']['inputs']['in_commands'] = 'integrator.output'
+    observation = {'observation_id': 'reference_profile_000123',
+                   'random_seeds': {'atmosphere': 1001968}, 'profile_ids': ['good']}
+    params['dataset']['observation_metadata'] = observation
+    run.mkdir()
+    workflow.run_params(params, run / 'science.yml')
+    for directory in (run / 'dataset', run / 'dataset/long_exposures'):
+        _, samples = read_shards(directory)
+        assert samples
+        for sample in samples:
+            assert sample['meta.json']['observation'] == observation
+            assert 'split' not in sample['meta.json']
+
+
 def test_configured_closed_loop_order_and_full_grid(tmp_path):
     params = yaml.safe_load((ROOT / 'config/START-SCAO/params_truthwfs_scao.yml').read_text())
     settings = yaml.safe_load((ROOT / 'config/START-SCAO/psf_grid.yml').read_text())

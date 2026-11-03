@@ -50,6 +50,93 @@ settings file. `--science-time 30` generates 30 seconds after settling: 150
 training samples and three independent 10-second exposures. The duration must
 contain complete short and long windows. Each run saves a frozen settings copy.
 
+## Reference and intermediate profile datasets
+
+Two ready-to-run configurations use Table 1 of Oya et al. (2014),
+*ULTIMATE-SUBARU: simulation update*, [doi:10.1117/12.2055701](https://doi.org/10.1117/12.2055701).
+There is **no pilot stage and no assigned train/validation/test split**.
+
+| Settings file | Observations | Definition |
+| --- | ---: | --- |
+| `reference_profile_dataset.yml` | 450 (indices 0–449) | 3 complete seeing-conditioned profiles × 5 zenith angles × 3 wind speed scales × 10 realizations |
+| `intermediate_profile_dataset.yml` | 150 (indices 0–149) | 75 interpolations between good/moderate and 75 between moderate/bad |
+
+Each observation has **1 s settling plus 10 s science at 500 Hz**. The science
+interval is [1, 11) s: 5,000 steps, 50 nonoverlapping 100-frame samples, and one
+10-second exposure. Both configurations retain the full 32 × 32 square grid
+plus on-axis, J/K, `nd: 2`, and 128 × 128 stamps. Across both datasets this gives
+30,000 short-window samples and 600 long-exposure samples.
+
+Resolve and inspect every condition without initializing SPECULA or a GPU:
+
+```sh
+mkdir -p output
+python config/START-SCAO/run_psf_grid.py manifest --settings config/START-SCAO/reference_profile_dataset.yml > output/reference_observations.jsonl
+python config/START-SCAO/run_psf_grid.py manifest --settings config/START-SCAO/intermediate_profile_dataset.yml > output/intermediate_observations.jsonl
+```
+
+Run one observation per process/GPU job using the existing direct WebDataset path:
+
+```sh
+python config/START-SCAO/run_psf_grid.py --target 0 --precision 1 run output/reference/obs_000000 --settings config/START-SCAO/reference_profile_dataset.yml --observation 0
+python config/START-SCAO/run_psf_grid.py --target 0 --precision 1 run output/intermediate/obs_000000 --settings config/START-SCAO/intermediate_profile_dataset.yml --observation 0
+```
+
+Change both the index and output directory for each observation. For a cluster
+job array, substitute the array task index for `--observation` and include it in
+the output directory. Use array indices 0–449 for reference and 0–149 for
+intermediate. Each invocation generates exactly one observation; no GPU batching
+or replay is involved. Existing output directories are rejected rather than
+overwritten. The original single-observation `psf_grid.yml` still works without
+`--observation`. Campaign settings require an explicit index and exactly 10 s of
+science; `--science-time` cannot extend a campaign observation.
+
+`oya2014_profiles.yml` records the seven layer heights, fractional contributions,
+and absolute integrated strengths from the paper. Total strengths are
+3.5781e-13, 5.2770e-13, and 8.1360e-13 m^(1/3). The atmospheric outer scale is
+30 m for these datasets; the original single-observation config uses 20 m.
+The zero-height contribution already includes the paper's assumed local/telescope
+contribution. No extra dome layer is added. The instrument calibration, empirical
+DM basis and controller are retained.
+
+For each reference profile, zenith angles are 0, 15, 30, 45 and 60 degrees and
+wind speed scales are 0.5, 1 and 2. The ten realizations in each cell use one
+jittered global wind rotation per 36-degree stratum, shuffled deterministically.
+The paper's wind speeds are MAOS defaults and its 50-degree layer direction
+increments are artificial. These wind variations are coverage assumptions, not
+measured Subaru weather frequencies.
+
+Intermediate profiles interpolate **absolute layer strengths**, then derive total
+strength, normalized fractions and r0. The interpolation coefficients are shuffled
+midpoints of 75 equal strata in (0, 1) for each adjacent pair. Zenith angle,
+wind speed scale and global rotation are sampled independently and uniformly over
+[0, 60] degrees, [0.5, 2], and [0, 360) degrees, respectively. These are synthetic
+interpolations within the paper's reference cases, not estimated probabilities.
+
+The runner derives r0 at 500 nm from the absolute turbulence integral and converts
+it to SPECULA's seeing parameter (approximately 0.676, 0.853 and 1.106 arcsec for
+the reference cases). The paper's finite-outer-scale FWHM values must not be used
+as `seeing.constant`. Strengths/heights remain referenced to zenith; SPECULA applies
+airmass once.
+
+Both configurations use 16,384-pixel screens (about 507 m at the configured pitch).
+The maximum wind travels about 419 m during 11 s. Before simulation, the runner
+checks the screen length against travel distance plus a conservative field
+footprint and rejects configurations that would cycle the screens.
+
+Every observation has a stable `observation_id`, distinct atmospheric and detector
+seeds, and a resolved `observation.json` beside the frozen simulation graph. The
+same record is included under `observation` in dataset metadata and each short-
+and long-exposure shard's `meta.json`. Seed blocks are disjoint between the two
+provided configurations. Model training code decides the splits; keep all windows
+from an observation together when avoiding temporal leakage. Copying a campaign
+to create additional independent observations requires a new simulation seed range.
+
+Float32 storage is approximately 9.2 GB per observation, or 5.5 TB for the complete
+600-observation set, excluding cached phase screens and calibration files.
+
+## Original single-observation defaults
+
 Defaults:
 
 | Setting | Value |
