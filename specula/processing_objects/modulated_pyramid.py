@@ -1,4 +1,4 @@
-from specula import fuse
+from specula import cpuArray, fuse
 from specula.lib.extrapolation_2d import EFInterpolator
 from specula.lib.interp2d import Interp2D
 
@@ -69,7 +69,11 @@ class ModulatedPyramid(BaseProcessingObj):
     fp_obs : float [pixels], optional
         Focal plane central obstruction diameter in pixels (default: None)
     pup_shifts : tuple [pixels], optional
-        Static pupil shifts in pixels (x, y) (default: (0.0, 0.0))
+        Static pupil shifts in pixels (x, y) (default: (0.0, 0.0)). The
+        optional input in_misregistration can change them, and
+        rotAnglePhInDeg, during the simulation. The shifts move the pupil
+        images on the detector, while the rotation is applied to the input
+        field.
     pyr_tlt_coeff : list [2,4], optional
         Pyramid tilt coefficients for each face. (default: None)
         The coefficient multiplies the x-tilt or y-tilt (rows) of each of each of the 
@@ -216,6 +220,10 @@ class ModulatedPyramid(BaseProcessingObj):
         self.mod_type = mod_type
         # Add iteration counter for alternating modulation
         self.iter = self.to_xp([0])
+        # Photons per unit of masked area of the input field (S0 * pixel_pitch**2):
+        # a host value, given to the GPU work of trigger_code() through this array
+        self._s0_area = self.xp.zeros((), dtype=self.dtype)
+        self._s0_area_host = None
 
         if mod_step is None:
             if mod_type == 'circular':
@@ -272,6 +280,8 @@ class ModulatedPyramid(BaseProcessingObj):
                                       precision=precision)
 
         self.inputs['in_ef'] = InputValue(type=ElectricField)
+        self.inputs['in_misregistration'] = InputValue(type=BaseValue, optional=True)
+        self._misregistration = None     # last value applied from in_misregistration
         self.outputs['out_i'] = self.out_i
         self.outputs['out_psf_tot'] = self.psf_tot
         self.outputs['out_psf_bfm'] = self.psf_bfm
@@ -290,7 +300,7 @@ class ModulatedPyramid(BaseProcessingObj):
         iu = self.xp.array(1j, dtype=self.complex_dtype)  # complex unit
         myexp = self.xp.exp(-2 * self.xp.pi * iu * self.pyr_tlt, dtype=self.complex_dtype)
         # FFT shifted complex phase delay of the pyramid prism and field stop
-        self.shifted_masked_exp = self.xp.fft.fftshift(myexp * self.fp_mask)
+        self.shifted_masked_exp = self.fft.fftshift(myexp * self.fp_mask)
 
         self.pup_pyr_tot = self.xp.zeros((self.fft_totsize, self.fft_totsize), dtype=self.dtype)
 
@@ -312,7 +322,15 @@ class ModulatedPyramid(BaseProcessingObj):
     def input_names(cls):
         return {'in_ef': InputDesc(ElectricField, 'Input electric field from the telescope pupil.'
                                                   'Contains complex amplitude and phase information '
-                                                  'that will be modulated and propagated through the pyramid.')}
+                                                  'that will be modulated and propagated through the pyramid.'),
+                'in_misregistration': InputDesc(BaseValue, 'Mis-registration [pupil shift x, pupil shift y '
+                                                           '(pixels, as pup_shifts), rotation (deg, as '
+                                                           'rotAnglePhInDeg)], applied when it changes: '
+                                                           'each change builds new interpolators and captures '
+                                                           'the CUDA graph again, so it is meant for occasional '
+                                                           'changes, not for a value that changes at every step. '
+                                                           'Keep its source on the CPU to avoid a GPU '
+                                                           'synchronization at each step (optional).')}
     
     @classmethod
     def output_names(cls):
@@ -566,8 +584,59 @@ class ModulatedPyramid(BaseProcessingObj):
     def prepare_trigger(self, t):
         super().prepare_trigger(t)
 
+        self._update_misregistration()
         self.ef_interpolator.interpolate()
         self.ef_interpolator.interpolated_ef().ef_at_lambda(self.wavelength_in_nm, out=self.ef)
+
+        self._update_s0_area()
+
+    def _update_misregistration(self):
+        '''Apply a new value of the in_misregistration input, when it changes'''
+        misreg = self.local_inputs.get('in_misregistration')
+        if misreg is None or misreg.generation_time != self.current_time:
+            return
+        value = tuple(float(v) for v in cpuArray(misreg.value).ravel())
+        if len(value) != 3:
+            raise ValueError(f'in_misregistration must have 3 values (shift x, shift y, rotation), got {value}')
+        if value == self._misregistration:
+            return
+        self._misregistration = value
+        self.pup_shifts = value[:2]
+        self._make_pup_shift_interp()
+        self.update_interpolator_parameters(rotAnglePhInDeg=value[2])
+
+    def _make_pup_shift_interp(self):
+        '''The interpolator of the pupil shifts (pup_shifts), only if they are not zero'''
+        if tuple(float(v) for v in self.pup_shifts) == (0.0, 0.0):
+            self._do_pup_shift = False
+            return
+        # Calculate scaling factor from FFT size to CCD size
+        imscale = float(self.fft_totsize) / float(self.toccd_side)
+        pup_shiftx = float(self.pup_shifts[0]) * imscale
+        pup_shifty = float(self.pup_shifts[1]) * imscale
+
+        # Create the interpolated pupil pyramid array
+        if getattr(self, '_pup_pyr_interpolated', None) is None or self._pup_pyr_interpolated is self.pup_pyr_tot:
+            self._pup_pyr_interpolated = self.xp.zeros((self.fft_totsize, self.fft_totsize), dtype=self.dtype)
+
+        self.pup_shift_interp = Interp2D(
+            (self.fft_totsize, self.fft_totsize),     # Input shape
+            (self.fft_totsize, self.fft_totsize),     # Output shape (same)
+            rotInDeg=0,                               # No rotation
+            rowShiftInPixels=pup_shifty,              # Y shift
+            colShiftInPixels=pup_shiftx,              # X shift
+            dtype=self.dtype,
+            xp=self.xp
+        )
+        self._do_pup_shift = True
+
+    def _update_s0_area(self):
+        '''Copy S0 * pixel_pitch**2 of the input field to the GPU, when it changes'''
+        in_ef = self.local_inputs['in_ef']
+        s0_area = in_ef.S0 * in_ef.pixel_pitch ** 2
+        if s0_area != self._s0_area_host:
+            self._s0_area_host = s0_area
+            self._s0_area.fill(s0_area)
 
     def trigger_code(self):
         # Select rotation based on current iteration for alternating modulation
@@ -587,7 +656,7 @@ class ModulatedPyramid(BaseProcessingObj):
 
         for i in range(0, self.mod_steps):
             # Fourier Transform to propagate to the Focal Plane
-            u_fp = self.xp.fft.fft2(self.u_tlt[i], axes=(-2, -1))
+            u_fp = self.fft.fft2(self.u_tlt[i], axes=(-2, -1))
 
             # Apply the 'fft shifted phase delay' of the pyramid and field stop
             # Also accumulates the focal plane PSF
@@ -595,13 +664,13 @@ class ModulatedPyramid(BaseProcessingObj):
 
             # Inverse Fourier Transform to return to the Pupil Plane
             # 'forward' normalization is faster and we normalize correctly later in pyr1_abs2()
-            pyr_ef = self.xp.fft.ifft2(u_fp_pyr, axes=(-2, -1), norm='forward')
+            pyr_ef = self.fft.ifft2(u_fp_pyr, axes=(-2, -1), norm='forward')
 
             # Calculate intensity and apply weighted accumulation for flux correction
             self.pyr_image += pyr1_abs2(pyr_ef, self.ifft_norm , self.ffv[i], xp=self.xp)
 
         # Extract PSF before and after the focal plane mask
-        self.psf_bfm.value[:] = self.xp.fft.fftshift(self.fpsf)
+        self.psf_bfm.value[:] = self.fft.fftshift(self.fpsf)
         self.psf_tot.value[:] = self.psf_bfm.value * self.fp_mask
 
         # Re-center the four pupils within the final array
@@ -614,12 +683,17 @@ class ModulatedPyramid(BaseProcessingObj):
         # Calculate the total optical transmission of the system
         self.transmission.value[:] = self.xp.sum(self.psf_tot.value) / self.xp.sum(self.psf_bfm.value)
 
-    def post_trigger(self):
-        super().post_trigger()
+        self._pupils_to_ccd()
 
-        # Always use the working field (like SH always uses self._wf1)
-        in_ef = self.local_inputs['in_ef']
-        phot = in_ef.S0 * in_ef.masked_area()
+    def _pupils_to_ccd(self):
+        '''
+        Normalize the pupils to the photons of the input field and the
+        transmission, and rebin them to the CCD (out_i). GPU work only, part of
+        trigger_code() (and of its CUDA graph): derived classes that override
+        trigger_code() call it at its end.
+        '''
+        # Photons of the input field: S0 times its masked area (ElectricField.masked_area())
+        phot = self._s0_area * self.xp.sum(self.local_inputs['in_ef'].field[0])
 
         self.pup_pyr_tot *= (phot / self.xp.sum(self.pup_pyr_tot)) * self.transmission.value
 #        if phot == 0: slows down?
@@ -644,16 +718,20 @@ class ModulatedPyramid(BaseProcessingObj):
             self.flux_frac_inside_ccd.value[:] = self.xp.sum(self.out_i.i[:])/self.xp.sum(ccd_internal)
         else:
             self.out_i.i[:] = ccd_internal
-        
+
+    def post_trigger(self):
+        super().post_trigger()
+
+        if self.mod_type == 'alternating':
+            # Increment iteration counter at the end (not in trigger_code(): the
+            # capture of a CUDA graph runs trigger_code() once more)
+            self.iter[0] += 1
+
         self.flux_frac_inside_ccd.generation_time = self.current_time
         self.out_i.generation_time = self.current_time
         self.psf_tot.generation_time = self.current_time
         self.psf_bfm.generation_time = self.current_time
         self.transmission.generation_time = self.current_time
-
-        if self.mod_type == 'alternating':
-            # Increment iteration counter at the end
-            self.iter[0] += 1
 
     def setup(self):
         super().setup()
@@ -678,29 +756,10 @@ class ModulatedPyramid(BaseProcessingObj):
             precision=self.precision
         )
 
-        # Create separate interpolator for pup_shifts if needed
-        if self.pup_shifts != (0.0, 0.0):
-            # Calculate scaling factor from FFT size to CCD size
-            imscale = float(self.fft_totsize) / float(self.toccd_side)
-            pup_shiftx = float(self.pup_shifts[0]) * imscale
-            pup_shifty = float(self.pup_shifts[1]) * imscale
+        # Separate interpolator for pup_shifts if needed
+        self._make_pup_shift_interp()
 
-            # Create the interpolated pupil pyramid array
-            self._pup_pyr_interpolated = self.xp.zeros((self.fft_totsize, self.fft_totsize), dtype=self.dtype)
-
-            self.pup_shift_interp = Interp2D(
-                (self.fft_totsize, self.fft_totsize),     # Input shape
-                (self.fft_totsize, self.fft_totsize),     # Output shape (same)
-                rotInDeg=0,                               # No rotation
-                rowShiftInPixels=pup_shifty,              # Y shift
-                colShiftInPixels=pup_shiftx,              # X shift
-                dtype=self.dtype,
-                xp=self.xp
-            )
-            self._do_pup_shift = True
-        else:
-            self._do_pup_shift = False
-
+        self._update_s0_area()
         if self.stream_enable:
             super().build_stream()
 

@@ -48,7 +48,8 @@ dependencies = { file = "requirements.txt" }
 control = ["control"]
 diagrams = ["orthogram"]
 dataset = ["webdataset>=1.0.2,<2"]
-all = ["control", "orthogram", "webdataset>=1.0.2,<2"]
+nn = ["torch"]
+all = ["control", "orthogram", "webdataset>=1.0.2,<2", "torch"]
 
 [tool.setuptools_scm]
 write_to = "specula/_version.py"

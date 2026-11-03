@@ -99,6 +99,24 @@ class TestLoopControlTiming(unittest.TestCase):
         loop.t0 = loop.seconds_to_t(0.5)
         assert loop.niters() == 10  # run_time/dt only, t0 not added
 
+    def test_niters_is_the_number_of_iterations_run(self):
+        """
+        Also when the run time is not a multiple of the time step: the last
+        iteration does not send the delayed outputs, and with MPI a receiver
+        waiting for them in one more iteration would wait forever
+        """
+        for run_time, dt in [(0.2, 0.1), (0.25, 0.1), (0.6000000006, 0.002), (0.0019, 0.002)]:
+            with self.subTest(run_time=run_time, dt=dt):
+                loop = LoopControl()
+                p = MockProcessingObjReady()
+                loop.add(p, idx=0)
+                calls = []
+                p.send_outputs = lambda skip_delayed=False, **kw: calls.append(skip_delayed)
+                loop.run(run_time=run_time, dt=dt)
+                self.assertEqual(loop.niters(), loop.iter_counter)
+                # The delayed outputs are skipped only in the last iteration
+                self.assertEqual(calls[-loop.iter_counter:], [False] * (loop.iter_counter - 1) + [True])
+
     @cpu_and_gpu
     def test_run_with_t0_starts_at_correct_time_and_iteration_count(self, target_device_idx, xp):
         """With t0 > 0, first check_ready receives t0 and total iterations equals run_time/dt"""
@@ -234,3 +252,25 @@ class TestSteppingFeature(unittest.TestCase):
 
         # should have updated threshold
         self.assertNotEqual(self.obj.next_time_to_stop, 0)
+
+
+class MockProcessingObjFinalize(BaseProcessingObj):
+    '''Remembers the current CUDA device when finalize() is called'''
+    def finalize(self):
+        import cupy
+        self.finalize_device = cupy.cuda.Device().id
+
+
+class TestFinalizeDevice(unittest.TestCase):
+
+    @unittest.skipIf(specula.cp is None or specula.cp.cuda.runtime.getDeviceCount() < 2,
+                     'at least 2 GPUs are needed')
+    def test_finalize_on_the_device_of_the_object(self):
+        obj = MockProcessingObjFinalize(target_device_idx=1)
+        loop = LoopControl()
+        loop.add(obj, 0)
+        specula.cp.cuda.Device(0).use()
+        loop.finish()
+        self.assertEqual(obj.finalize_device, 1)
+        # The current device is restored
+        self.assertEqual(specula.cp.cuda.Device().id, 0)

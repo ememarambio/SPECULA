@@ -1,3 +1,4 @@
+import inspect
 import warnings
 
 import numpy as np
@@ -236,6 +237,38 @@ class SH(BaseProcessingObj):
             'out_i': OutputDesc(Intensity, 'Output Shack-Hartmann focal-plane intensity image'),
         }
 
+    @classmethod
+    def split_options(cls, params, max_devices):
+        '''
+        The subaperture rows split over k devices (DistributedSH), for each k
+        that divides their number, if DistributedSH accepts all the parameters.
+        Derived classes, DistributedSH included, are not split: an explicit
+        DistributedSH keeps its number of slices.
+        '''
+        if cls is not SH:
+            return {}
+        from specula.processing_objects.distributed_sh import DistributedSH
+        rows = params.get('subap_on_diameter')
+        if not isinstance(rows, int) or params.get('subap_rows_slice') is not None:
+            return {}
+        accepted = inspect.signature(DistributedSH.__init__).parameters
+        for key in params:
+            if key in ('class', 'inputs', 'outputs', 'gui_pos'):
+                continue
+            # As Simul: "laser_launch_tel_ref" sets the parameter laser_launch_tel
+            name = next((key.removesuffix(suffix) for suffix in ('_ref', '_data', '_object')
+                         if key.endswith(suffix) and key.removesuffix(suffix) in accepted), key)
+            if name not in accepted:
+                return {}
+        # The defaults of SH that DistributedSH does not share, made explicit
+        own = inspect.signature(cls.__init__).parameters
+        defaults = {name: p.default for name, p in own.items()
+                    if name in accepted and name not in params
+                    and p.default is not inspect.Parameter.empty
+                    and accepted[name].default != p.default}
+        return {k: {**params, **defaults, 'class': 'DistributedSH', 'n_slices': k}
+                for k in range(2, max_devices + 1) if rows % k == 0}
+
     def _set_in_ef(self, in_ef):
         '''
         Compute the SH geometry from the input electric field.
@@ -463,16 +496,16 @@ class SH(BaseProcessingObj):
                              out=self.ef_row)
             self._wf3_view[:] = self._subap_cube_view
 
-            fp4 = xp.fft.fft2(self._wf3, axes=(1, 2))
+            fp4 = self.fft.fft2(self._wf3, axes=(1, 2))
             abs2(fp4, self._intensity, xp=xp)
 
             if self._kernelobj is None:
                 psf, g = self._intensity, self._pix_int_matrix
             else:
                 subap_kern_fft = self._kernelobj.kernels[i * dimx: (i + 1) * dimx]
-                psf_fft = xp.fft.rfft2(self._intensity)
+                psf_fft = self.fft.rfft2(self._intensity)
                 psf_fft *= subap_kern_fft
-                psf = xp.fft.irfft2(psf_fft, s=(self._fft_size, self._fft_size), norm='forward')
+                psf = self.fft.irfft2(psf_fft, s=(self._fft_size, self._fft_size), norm='forward')
                 g = self._pix_int_matrix_kernel
 
             # Detector pixels: G @ PSF @ G.T for each subaperture

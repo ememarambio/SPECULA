@@ -12,6 +12,62 @@ from specula import cpuArray, np
 
 class TestPsfCoronagraph(unittest.TestCase):
 
+    @cpu_and_gpu
+    def test_empty_pupil(self, target_device_idx, xp):
+        # No pupil pixel: the coronagraph subtracts nothing, and the result is finite
+        simul_params, ef, wavelengthInNm = self.get_basic_setup(target_device_idx)
+        psf_coro = PsfCoronagraph(simul_params=simul_params, wavelengthInNm=wavelengthInNm,
+                                  nd=1.0, target_device_idx=target_device_idx)
+        psf_coro.inputs['in_ef'].set(ef)
+        psf_coro.setup()
+        ef.A[:] = 0.0
+        for use_average_field in (True, False):
+            psf_coro.use_average_field = use_average_field
+            coro_psf = cpuArray(psf_coro.calc_coronagraph_psf(ef.phaseInNm, ef.A, normalize=False))
+            self.assertTrue(np.all(np.isfinite(coro_psf)))
+            np.testing.assert_array_equal(coro_psf, 0)
+
+    @unittest.skipIf(specula.cp is None, 'Cupy not found')
+    def test_accelerated_matches_normal_run(self):
+        from iteras.accelerator import Accelerator
+        from iteras.data_objects.accelerator import Accelerator as AcceleratorOptions
+
+        def run(accelerate, use_average_field):
+            simul_params, ef, wavelengthInNm = self.get_basic_setup(0, pixel_pupil=32)
+            psf_coro = PsfCoronagraph(simul_params=simul_params, wavelengthInNm=wavelengthInNm,
+                                      nd=2.0, use_average_field=use_average_field,
+                                      target_device_idx=0)
+            psf_coro.inputs['in_ef'].set(ef)
+            if accelerate:
+                Accelerator(AcceleratorOptions()).apply([psf_coro])
+            psf_coro.setup()
+            yy, xx = np.mgrid[0:32, 0:32] / 32.0
+            out = []
+            for step in range(6):
+                t = psf_coro.seconds_to_t(0.001 * step)
+                # A field that changes at each step, updated in place
+                ef.phaseInNm[:] = specula.cp.asarray(50.0 * np.sin(2 * np.pi * (xx * (step + 1) + yy)))
+                ef.generation_time = t
+                psf_coro.check_ready(t)
+                psf_coro.trigger()
+                psf_coro.post_trigger()
+                out.append((cpuArray(psf_coro.coronagraph_psf.value).copy(),
+                            float(psf_coro.sr.value)))
+            psf_coro.finalize()
+            return out, psf_coro, cpuArray(psf_coro.int_coronagraph_psf.value)
+
+        for use_average_field in (True, False):
+            with self.subTest(use_average_field=use_average_field):
+                ref, _, ref_int = run(False, use_average_field)
+                out, psf_coro, out_int = run(True, use_average_field)
+                self.assertEqual(psf_coro._accel.status, 'accelerated')
+                for (a, sr_a), (b, sr_b) in zip(ref, out):
+                    np.testing.assert_allclose(b, a, rtol=1e-5, atol=1e-7 * a.max())
+                    self.assertAlmostEqual(sr_a, sr_b, places=6)
+                np.testing.assert_allclose(out_int, ref_int, rtol=1e-5, atol=1e-7 * ref_int.max())
+                # Different steps give different PSFs (the graph is not frozen)
+                self.assertGreater(np.abs(out[1][0] - out[4][0]).max(), 1e-3 * out[1][0].max())
+
     def get_basic_setup(self, target_device_idx, pixel_pupil=16):
         """Create basic setup for coronagraph tests"""
         pixel_pitch = 0.05
@@ -190,3 +246,27 @@ class TestPsfCoronagraph(unittest.TestCase):
         self.assertEqual(std_profile_data.shape[0], 2)
         self.assertGreater(float(psf_coro.int_coronagraph_psf.value.max()), 0.0)
         self.assertGreaterEqual(float(psf_coro.std_coronagraph_psf.value.max()), 0.0)
+
+    def test_logs(self):
+        from unittest import mock
+        import logging
+        from types import SimpleNamespace
+        from specula.processing_objects.psf import PSF
+        # Strehl ratio not logged: nothing is read
+        quiet = SimpleNamespace(logger=mock.Mock(isEnabledFor=lambda level: False))
+        PSF._log_sr(quiet)
+        quiet.logger.info.assert_not_called()
+        # Peak suppression logged when debugging
+        simul_params, ef, wavelengthInNm = self.get_basic_setup(-1)
+        psf_coro = PsfCoronagraph(simul_params=simul_params, wavelengthInNm=wavelengthInNm,
+                                  nd=2.0, target_device_idx=-1)
+        psf_coro.inputs['in_ef'].set(ef)
+        psf_coro.setup()
+        psf_coro.logger.setLevel(logging.DEBUG)
+        ef.generation_time = 0
+        with mock.patch.object(psf_coro.logger, 'debug') as debug:
+            psf_coro.check_ready(0)
+            psf_coro.trigger()
+            psf_coro.post_trigger()
+        self.assertIn('peak suppression', debug.call_args.args[0])
+

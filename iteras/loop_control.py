@@ -5,6 +5,7 @@ from contextlib import nullcontext
 
 from iteras.base_time_obj import BaseTimeObj
 import iteras
+from iteras import mpi_progress
 from iteras.tracing import tracer
 
 
@@ -64,12 +65,15 @@ class LoopControl(BaseTimeObj):
 
     def niters(self):
         """
-        Calculate the number of iterations based on the run time and time step.
+        Calculate the number of iterations based on the run time and time step:
+        as many as the loop runs (while t < t0 + run_time), that is, rounded up
+        when the run time is not a multiple of the time step. The last one does
+        not send the delayed outputs, which no process would receive.
 
         Returns:
             int: The number of iterations.
         """
-        return int(self.run_time / self.dt) if self.dt != 0 else 0
+        return -(-self.run_time // self.dt) if self.dt != 0 else 0
 
     def run(self, run_time, dt, t0=0, speed_report=False, preroll_objs=None):
         """
@@ -84,6 +88,15 @@ class LoopControl(BaseTimeObj):
                 before the loop starts, so that their state at t0 is the same as in a
                 run started from 0 (default: None).
         """
+        # Each phase of each object runs on its device: restore the current device at the end
+        device = iteras.cp.cuda.Device() if iteras.cp is not None else None
+        try:
+            self._run(run_time, dt, t0, speed_report, preroll_objs)
+        finally:
+            if device is not None:  # pragma: gpu
+                device.use()
+
+    def _run(self, run_time, dt, t0, speed_report, preroll_objs):
         self.start(run_time, dt, t0=t0, speed_report=speed_report, preroll_objs=preroll_objs)
         self.next_time_to_stop = 0
         while self.run_time < 0 or self.t < self.t0 + self.run_time:
@@ -207,6 +220,8 @@ class LoopControl(BaseTimeObj):
             tracer.begin_iteration(self.iter_counter, self.t_to_seconds(self.t))
 
         for i in sorted(self.trigger_lists.keys()):
+            # Let MPI move the data of the sends in flight
+            mpi_progress.progress()
             # all the objects having this trigger order could be remote
             self.logger.mpi_debug(f'before check_ready')
             for element in self.trigger_lists[i]:
@@ -282,16 +297,27 @@ class LoopControl(BaseTimeObj):
             self.mem_report(title)
 
     def finish(self):
+        # The receivers are still running: wait for them to get our last outputs
+        mpi_progress.wait_all()
         if self._mem_pending:
             never = sorted(el.name for el in self._mem_pending)
             self._report_mem(f'at the end (never triggered: {", ".join(never)})')
         self._mem_pending = set()
         self._mem_first_trigger_report = False
 
-        for i in sorted(self.trigger_lists.keys()):
-            for element in self.trigger_lists[i]:
-                try:
-                    element.finalize()
-                except:
-                    self.logger.error(f'Exception in {element.name}')
-                    raise
+        # As for the other phases, finalize() runs on the device of the object;
+        # the current device is then restored, for the code that runs after
+        device = iteras.cp.cuda.Device() if iteras.cp is not None else None
+        try:
+            for i in sorted(self.trigger_lists.keys()):
+                for element in self.trigger_lists[i]:
+                    try:
+                        if element.target_device_idx >= 0:  # pragma: gpu
+                            element._target_device.use()
+                        element.finalize()
+                    except:
+                        self.logger.error(f'Exception in {element.name}')
+                        raise
+        finally:
+            if device is not None:  # pragma: gpu
+                device.use()

@@ -245,6 +245,23 @@ class CCD(BaseProcessingObj):
         return {'out_pixels': OutputDesc(Pixels, 'Output pixel data after noise and binning'),
                 'integrated_i': OutputDesc(Intensity, 'Integrated intensity over the exposure')}
 
+    def can_accelerate(self):
+        # trigger_code() decides on the host when to integrate and read out
+        if self.dt != self.loop_dt:
+            return 'integrates over several steps'
+        if self.current_time < self.start_time:
+            return 'before its start time'
+        # Random numbers from cuRAND or uploaded from the host, and cuBLAS
+        # products, cannot be captured (readout noise uses a generator whose
+        # state is on the GPU, which can)
+        for enabled, noise in ((self._photon_noise, 'photon noise'),
+                               (self._excess_noise, 'excess noise'),
+                               (self._cic_noise, 'clock-induced charge noise'),
+                               (self._cte_noise, 'charge transfer noise')):
+            if enabled:
+                return f'{noise} cannot be captured in a CUDA graph'
+        return True
+
     def trigger_code(self):
         if self.current_time < self.start_time:
             return

@@ -168,6 +168,61 @@ Notes
 - ``MPI_DBG`` and ``MPI_SEND_DBG`` are application-specific logging levels and are not part of the standard Python logging levels.
 - Lower verbosity levels (e.g., DEBUG) may produce large volumes of output.
 
+Accelerating objects
+====================
+
+With ``--accelerate``, the GPU work of the objects runs as CUDA graphs chained on
+one stream per device, without the host waiting for the GPU between objects:
+
+.. code-block:: bash
+
+    specula --accelerate params.yml
+
+Simulations whose time per step is set by the host, not by the GPU, run
+faster; the results agree with those of the normal run to rounding. See
+:doc:`accelerator`.
+
+.. _running_with_mpi:
+
+Running with MPI
+================
+
+A simulation can be split among several processes, possibly on several nodes, with MPI
+(the ``mpi4py`` package is needed):
+
+.. code-block:: bash
+
+    mpirun -n 4 specula --mpi params.yml placement.yml
+
+Each object runs in the process given by its ``target_rank`` parameter (0 by default), on the
+device given by ``target_device_idx``. They can be written by hand or computed by the
+:doc:`allocator <allocator>`.
+
+The outputs read by objects in other processes are copied to the host and sent at each step
+with non-blocking sends, so the sending process goes on at once. The data of a large message
+moves only when the receiver is waiting for it and, unless the MPI transport lets the receiver
+pull it by itself (single-copy shared memory between processes of the same node), while the
+sender is inside an MPI call. So a process that waits for its GPU while some of its sends are
+in flight keeps testing them, instead of blocking. At most two steps of each output can be in
+flight to a process; a process that runs further ahead waits for its receivers.
+
+Environment variables change this behavior:
+
+``ITERAS_MPI_GPU_DIRECT``
+    ``1`` to send and receive the outputs of GPU objects directly from and to GPU memory,
+    without copies to the host (default ``0``). It needs a CUDA-aware MPI, like Open MPI built
+    with CUDA and UCX (``ompi_info`` shows ``mpi_built_with_cuda_support:value:true``): with
+    any other MPI the processes crash. On Leonardo it moved a 2 MiB message between nodes in
+    0.11 ms instead of 0.51 ms, and between the GPUs of a node in 0.04 ms instead of 0.58 ms.
+    For the :doc:`allocator <allocator>`, set ``mpi_gpu_direct: true`` in the ``links`` of the
+    nodes.
+``ITERAS_MPI_SEND_MODE``
+    ``nonblocking`` (default) or ``buffered``: the previous behavior, with buffered sends
+    (``MPI_Ibsend``), whose data moves only when the sender calls MPI. Buffered sends always
+    go through the host.
+``ITERAS_MPI_POLL``
+    ``0`` to block while waiting for the GPU, even with sends in flight.
+
 Asynchronous Displays
 =====================
 
